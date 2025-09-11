@@ -224,7 +224,19 @@ def adapt(llm_handler, cache_data_convert, update_cache_callback, *args, **kwarg
                     cache_whole_data[0],
                     round(time.time() - start_time, 6),
                 )
-            return cache_data_convert(return_message)
+
+            # ---- Add meta to HIT response ----
+            resp = cache_data_convert(return_message)
+            _total_elapsed = time.time() - start_time
+            if isinstance(resp, dict):
+                meta = resp.get("gptcache_meta", {})
+                meta.update({
+                    "hit": True,
+                    "llm_time_s": 0.0,
+                    "total_time_s": round(_total_elapsed, 6),
+                })
+                resp["gptcache_meta"] = meta
+            return resp
 
     next_cache = chat_cache.next_cache
     if next_cache:
@@ -240,9 +252,12 @@ def adapt(llm_handler, cache_data_convert, update_cache_callback, *args, **kwarg
         if search_only_flag:
             # cache miss
             return None
+        # ---- Time the MISS path (LLM call) ----
+        _llm_start = time.time()
         llm_data = time_cal(
             llm_handler, func_name="llm_request", report_func=chat_cache.report.llm
         )(*args, **kwargs)
+        _llm_elapsed = time.time() - _llm_start
 
     if not llm_data:
         return None
@@ -279,6 +294,22 @@ def adapt(llm_handler, cache_data_convert, update_cache_callback, *args, **kwarg
             )
         except Exception as e:  # pylint: disable=W0703
             gptcache_log.warning("failed to save the data to cache, error: %s", e)
+
+    # ---- Add meta to MISS (or propagate from nested) ----
+    _total_elapsed = time.time() - start_time
+    if isinstance(llm_data, dict):
+        meta = llm_data.get("gptcache_meta", {})
+        if "llm_time_s" not in meta:
+            # If this frame actually called the LLM, _llm_elapsed exists
+            try:
+                meta["llm_time_s"] = round(_llm_elapsed, 6)
+                meta["hit"] = False
+            except NameError:
+                # Came from a deeper adapt() (possibly already set meta)
+                pass
+        meta["total_time_s"] = round(_total_elapsed, 6)
+        llm_data["gptcache_meta"] = meta
+
     return llm_data
 
 
