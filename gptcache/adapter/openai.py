@@ -1,7 +1,7 @@
-from typing import Any, AsyncGenerator, Iterator
+from typing import AsyncGenerator, Iterator
 
 from gptcache import cache
-from gptcache.adapter.adapter import adapt
+from gptcache.adapter.adapter import adapt, aadapt
 from gptcache.manager.scalar_data.base import Answer, DataType
 from gptcache.utils import import_openai
 from gptcache.utils.error import wrap_error
@@ -10,8 +10,7 @@ from gptcache.utils.response import (
     # get_image_from_openai_b64,
     # get_image_from_openai_url,
     # get_message_from_openai_answer,
-    get_message_from_openai_answer2,
-    get_stream_message_from_openai_answer,
+    get_stream_message_from_openai_answer, get_message_from_openai_answer,
     # get_stream_message_from_openai_answer2,
     # get_text_from_openai_answer,
 )
@@ -24,24 +23,129 @@ from ._util import (
     # _construct_text_from_cache,
     _num_tokens_from_messages,
 )
+from .base import BaseCacheLLM
+
+# from warnings import deprecated
 
 import_openai()
 
 # pylint: disable=C0413
 # pylint: disable=E1102
 import openai
-from openai import OpenAI
+
+# from openai import OpenAI
 
 
-def cache_openai_chat_complete(client: OpenAI, **openai_kwargs: Any):
-    def _llm_handler(**llm_kwargs):
+# def cache_openai_chat_complete(client: OpenAI, **openai_kwargs: Any):
+#     def _llm_handler(**llm_kwargs):
+#         try:
+#             return client.chat.completions.create(**llm_kwargs)
+#         except openai.OpenAIError as e:
+#             raise wrap_error(e) from e
+#
+#     def _update_cache_callback(
+#         llm_data, update_cache_func, *args, **kwargs
+#     ):  # pylint: disable=unused-argument
+#         if isinstance(llm_data, AsyncGenerator):
+#
+#             async def hook_openai_data(it):
+#                 total_answer = ""
+#                 async for item in it:
+#                     total_answer += get_stream_message_from_openai_answer(item)
+#                     yield item
+#                 update_cache_func(Answer(total_answer, DataType.STR))
+#
+#             return hook_openai_data(llm_data)
+#         elif not isinstance(llm_data, Iterator):
+#             update_cache_func(
+#                 Answer(get_message_from_openai_answer2(llm_data), DataType.STR)
+#             )
+#             return llm_data
+#         else:
+#             def hook_openai_data(it):
+#                 total_answer = ""
+#                 for item in it:
+#                     total_answer += get_stream_message_from_openai_answer(item)
+#                     yield item
+#                 update_cache_func(Answer(total_answer, DataType.STR))
+#
+#             return hook_openai_data(llm_data)
+#
+#     chat_cache = openai_kwargs.get("cache_obj", cache)
+#     enable_token_counter = chat_cache.config.enable_token_counter
+#
+#     def cache_data_convert(cache_data):
+#         if enable_token_counter:
+#             input_token = _num_tokens_from_messages(openai_kwargs.get("messages"))
+#             output_token = token_counter(cache_data)
+#             saved_token = [input_token, output_token]
+#         else:
+#             saved_token = [0, 0]
+#         if openai_kwargs.get("stream", False):
+#             return _construct_stream_resp_from_cache(cache_data, saved_token)
+#         return _construct_resp_from_cache(cache_data, saved_token)
+#
+#     return adapt(
+#         _llm_handler,
+#         cache_data_convert,
+#         _update_cache_callback,
+#         **openai_kwargs,
+#     )
+
+deprecated_openai_str = "please update the openai version to 1.x, and use the cache_openai_xxx method"
+
+
+# @deprecated(deprecated_openai_str)
+class ChatCompletion(openai.ChatCompletion, BaseCacheLLM):
+    """Openai ChatCompletion Wrapper
+
+    Example:
+        .. code-block:: python
+
+            from gptcache import cache
+            from gptcache.processor.pre import get_prompt
+            # init gptcache
+            cache.init()
+            cache.set_openai_key()
+
+            from gptcache.adapter import openai
+            # run ChatCompletion model with gptcache
+            response = openai.ChatCompletion.create(
+                          model='gpt-3.5-turbo',
+                          messages=[
+                            {
+                                'role': 'user',
+                                'content': "what's github"
+                            }],
+                        )
+            response_content = response['choices'][0]['message']['content']
+    """
+
+    @classmethod
+    def _llm_handler(cls, *llm_args, **llm_kwargs):
         try:
-            return client.chat.completions.create(**llm_kwargs)
+            return (
+                super().create(*llm_args, **llm_kwargs)
+                if cls.llm is None
+                else cls.llm(*llm_args, **llm_kwargs)
+            )
         except openai.OpenAIError as e:
             raise wrap_error(e) from e
 
+    @classmethod
+    async def _allm_handler(cls, *llm_args, **llm_kwargs):
+        try:
+            return (
+                (await super().acreate(*llm_args, **llm_kwargs))
+                if cls.llm is None
+                else await cls.llm(*llm_args, **llm_kwargs)
+            )
+        except openai.OpenAIError as e:
+            raise wrap_error(e) from e
+
+    @staticmethod
     def _update_cache_callback(
-        llm_data, update_cache_func, *args, **kwargs
+            llm_data, update_cache_func, *args, **kwargs
     ):  # pylint: disable=unused-argument
         if isinstance(llm_data, AsyncGenerator):
 
@@ -55,7 +159,7 @@ def cache_openai_chat_complete(client: OpenAI, **openai_kwargs: Any):
             return hook_openai_data(llm_data)
         elif not isinstance(llm_data, Iterator):
             update_cache_func(
-                Answer(get_message_from_openai_answer2(llm_data), DataType.STR)
+                Answer(get_message_from_openai_answer(llm_data), DataType.STR)
             )
             return llm_data
         else:
@@ -68,163 +172,62 @@ def cache_openai_chat_complete(client: OpenAI, **openai_kwargs: Any):
 
             return hook_openai_data(llm_data)
 
-    chat_cache = openai_kwargs.get("cache_obj", cache)
-    enable_token_counter = chat_cache.config.enable_token_counter
+    @classmethod
+    def create(cls, *args, **kwargs):
+        chat_cache = kwargs.get("cache_obj", cache)
+        enable_token_counter = chat_cache.config.enable_token_counter
 
-    def cache_data_convert(cache_data):
-        if enable_token_counter:
-            input_token = _num_tokens_from_messages(openai_kwargs.get("messages"))
-            output_token = token_counter(cache_data)
-            saved_token = [input_token, output_token]
-        else:
-            saved_token = [0, 0]
-        if openai_kwargs.get("stream", False):
-            return _construct_stream_resp_from_cache(cache_data, saved_token)
-        return _construct_resp_from_cache(cache_data, saved_token)
+        def cache_data_convert(cache_data):
+            if enable_token_counter:
+                input_token = _num_tokens_from_messages(kwargs.get("messages"))
+                output_token = token_counter(cache_data)
+                saved_token = [input_token, output_token]
+            else:
+                saved_token = [0, 0]
+            if kwargs.get("stream", False):
+                return _construct_stream_resp_from_cache(cache_data, saved_token)
+            return _construct_resp_from_cache(cache_data, saved_token)
 
-    return adapt(
-        _llm_handler,
-        cache_data_convert,
-        _update_cache_callback,
-        **openai_kwargs,
-    )
+        kwargs = cls.fill_base_args(**kwargs)
+        return adapt(
+            cls._llm_handler,
+            cache_data_convert,
+            cls._update_cache_callback,
+            *args,
+            **kwargs,
+        )
 
-deprecated_openai_str = "please update the openai version to 1.x, and use the cache_openai_xxx method"
+    @classmethod
+    async def acreate(cls, *args, **kwargs):
+        chat_cache = kwargs.get("cache_obj", cache)
+        enable_token_counter = chat_cache.config.enable_token_counter
 
-# @deprecated(deprecated_openai_str)
-# class ChatCompletion(openai.ChatCompletion, BaseCacheLLM):
-#     """Openai ChatCompletion Wrapper
+        def cache_data_convert(cache_data):
+            if enable_token_counter:
+                input_token = _num_tokens_from_messages(kwargs.get("messages"))
+                output_token = token_counter(cache_data)
+                saved_token = [input_token, output_token]
+            else:
+                saved_token = [0, 0]
+            if kwargs.get("stream", False):
+                return async_iter(
+                    _construct_stream_resp_from_cache(cache_data, saved_token)
+                )
+            return _construct_resp_from_cache(cache_data, saved_token)
 
-#     Example:
-#         .. code-block:: python
-
-#             from gptcache import cache
-#             from gptcache.processor.pre import get_prompt
-#             # init gptcache
-#             cache.init()
-#             cache.set_openai_key()
-
-#             from gptcache.adapter import openai
-#             # run ChatCompletion model with gptcache
-#             response = openai.ChatCompletion.create(
-#                           model='gpt-3.5-turbo',
-#                           messages=[
-#                             {
-#                                 'role': 'user',
-#                                 'content': "what's github"
-#                             }],
-#                         )
-#             response_content = response['choices'][0]['message']['content']
-#     """
-
-#     @classmethod
-#     def _llm_handler(cls, *llm_args, **llm_kwargs):
-#         try:
-#             return (
-#                 super().create(*llm_args, **llm_kwargs)
-#                 if cls.llm is None
-#                 else cls.llm(*llm_args, **llm_kwargs)
-#             )
-#         except openai.OpenAIError as e:
-#             raise wrap_error(e) from e
-
-#     @classmethod
-#     async def _allm_handler(cls, *llm_args, **llm_kwargs):
-#         try:
-#             return (
-#                 (await super().acreate(*llm_args, **llm_kwargs))
-#                 if cls.llm is None
-#                 else await cls.llm(*llm_args, **llm_kwargs)
-#             )
-#         except openai.OpenAIError as e:
-#             raise wrap_error(e) from e
-
-#     @staticmethod
-#     def _update_cache_callback(
-#         llm_data, update_cache_func, *args, **kwargs
-#     ):  # pylint: disable=unused-argument
-#         if isinstance(llm_data, AsyncGenerator):
-
-#             async def hook_openai_data(it):
-#                 total_answer = ""
-#                 async for item in it:
-#                     total_answer += get_stream_message_from_openai_answer(item)
-#                     yield item
-#                 update_cache_func(Answer(total_answer, DataType.STR))
-
-#             return hook_openai_data(llm_data)
-#         elif not isinstance(llm_data, Iterator):
-#             update_cache_func(
-#                 Answer(get_message_from_openai_answer(llm_data), DataType.STR)
-#             )
-#             return llm_data
-#         else:
-#             def hook_openai_data(it):
-#                 total_answer = ""
-#                 for item in it:
-#                     total_answer += get_stream_message_from_openai_answer(item)
-#                     yield item
-#                 update_cache_func(Answer(total_answer, DataType.STR))
-
-#             return hook_openai_data(llm_data)
-
-#     @classmethod
-#     def create(cls, *args, **kwargs):
-#         chat_cache = kwargs.get("cache_obj", cache)
-#         enable_token_counter = chat_cache.config.enable_token_counter
-
-#         def cache_data_convert(cache_data):
-#             if enable_token_counter:
-#                 input_token = _num_tokens_from_messages(kwargs.get("messages"))
-#                 output_token = token_counter(cache_data)
-#                 saved_token = [input_token, output_token]
-#             else:
-#                 saved_token = [0, 0]
-#             if kwargs.get("stream", False):
-#                 return _construct_stream_resp_from_cache(cache_data, saved_token)
-#             return _construct_resp_from_cache(cache_data, saved_token)
-
-#         kwargs = cls.fill_base_args(**kwargs)
-#         return adapt(
-#             cls._llm_handler,
-#             cache_data_convert,
-#             cls._update_cache_callback,
-#             *args,
-#             **kwargs,
-#         )
-
-#     @classmethod
-#     async def acreate(cls, *args, **kwargs):
-#         chat_cache = kwargs.get("cache_obj", cache)
-#         enable_token_counter = chat_cache.config.enable_token_counter
-
-#         def cache_data_convert(cache_data):
-#             if enable_token_counter:
-#                 input_token = _num_tokens_from_messages(kwargs.get("messages"))
-#                 output_token = token_counter(cache_data)
-#                 saved_token = [input_token, output_token]
-#             else:
-#                 saved_token = [0, 0]
-#             if kwargs.get("stream", False):
-#                 return async_iter(
-#                     _construct_stream_resp_from_cache(cache_data, saved_token)
-#                 )
-#             return _construct_resp_from_cache(cache_data, saved_token)
-
-#         kwargs = cls.fill_base_args(**kwargs)
-#         return await aadapt(
-#             cls._allm_handler,
-#             cache_data_convert,
-#             cls._update_cache_callback,
-#             *args,
-#             **kwargs,
-#         )
+        kwargs = cls.fill_base_args(**kwargs)
+        return await aadapt(
+            cls._allm_handler,
+            cache_data_convert,
+            cls._update_cache_callback,
+            *args,
+            **kwargs,
+        )
 
 
 async def async_iter(input_list):
     for item in input_list:
         yield item
-
 
 # @deprecated(deprecated_openai_str)
 # class Completion(openai.Completion, BaseCacheLLM):
