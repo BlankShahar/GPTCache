@@ -22,7 +22,12 @@ class Answer:
     """
 
     answer: Any
+    latency: int
     answer_type: int = DataType.STR
+
+    @property
+    def length(self) -> int:
+        return len(self.answer)
 
 
 @dataclass
@@ -71,13 +76,13 @@ class CacheData:
     last_access: Optional[datetime] = None
 
     def __init__(
-        self,
-        question,
-        answers,
-        embedding_data=None,
-        session_id=None,
-        create_on=None,
-        last_access=None,
+            self,
+            question,
+            answers,
+            embedding_data=None,
+            session_id=None,
+            create_on=None,
+            last_access=None,
     ):
         self.question = question
         self.answers = []
@@ -146,13 +151,13 @@ class CacheStorage(metaclass=ABCMeta):
 
     @abstractmethod
     def report_cache(
-        self,
-        user_question,
-        cache_question,
-        cache_question_id,
-        cache_answer,
-        similarity_value,
-        cache_delta_time,
+            self,
+            user_question,
+            cache_question,
+            cache_question_id,
+            cache_answer,
+            similarity_value,
+            cache_delta_time,
     ):
         pass
 

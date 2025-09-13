@@ -71,13 +71,13 @@ class DataManager(metaclass=ABCMeta):
         pass
 
     def report_cache(
-        self,
-        user_question,
-        cache_question,
-        cache_question_id,
-        cache_answer,
-        similarity_value,
-        cache_delta_time,
+            self,
+            user_question,
+            cache_question,
+            cache_question_id,
+            cache_answer,
+            similarity_value,
+            cache_delta_time,
     ):
         pass
 
@@ -132,17 +132,17 @@ class MapDataManager(DataManager):
         self.data[embedding_data] = (question, answer, embedding_data, session_id)
 
     def import_data(
-        self,
-        questions: List[Any],
-        answers: List[Any],
-        embedding_datas: List[Any],
-        session_ids: List[Optional[str]],
-        **_,
+            self,
+            questions: List[Any],
+            answers: List[Any],
+            embedding_datas: List[Any],
+            session_ids: List[Optional[str]],
+            **_,
     ):
         if (
-            len(questions) != len(answers)
-            or len(questions) != len(embedding_datas)
-            or len(questions) != len(session_ids)
+                len(questions) != len(answers)
+                or len(questions) != len(embedding_datas)
+                or len(questions) != len(session_ids)
         ):
             raise ParamError("Make sure that all parameters have the same length")
         for i, embedding_data in enumerate(embedding_datas):
@@ -160,7 +160,7 @@ class MapDataManager(DataManager):
                 res_data[1].answer if isinstance(res_data[1], Answer) else res_data[1]
             )
             if not session.check_hit_func(
-                session.name, list(res_data[3]), [res_data[0]], answer
+                    session.name, list(res_data[3]), [res_data[0]], answer
             ):
                 return None
         return CacheData(question=res_data[0], answers=res_data[1])
@@ -223,14 +223,14 @@ class SSDataManager(DataManager):
     """
 
     def __init__(
-        self,
-        s: CacheStorage,
-        v: VectorBase,
-        o: Optional[ObjectBase],
-        e: Optional[EvictionBase],
-        max_size,
-        clean_size,
-        policy="LRU"
+            self,
+            s: CacheStorage,
+            v: VectorBase,
+            o: Optional[ObjectBase],
+            e: Optional[EvictionBase],
+            max_size,
+            clean_size,
+            policy="LRU"
     ):
         self.s = s
         self.v = v
@@ -253,7 +253,7 @@ class SSDataManager(DataManager):
         if self.eviction_manager.check_evict():
             self.eviction_manager.delete()
 
-    def save(self, question, answer, embedding_data, **kwargs):
+    def save(self, question: str, answer: Answer, embedding_data: List[float], **kwargs):
         """Save the data and vectors to cache and vector storage.
 
         :param question: question data.
@@ -300,17 +300,17 @@ class SSDataManager(DataManager):
         return Question(question)
 
     def import_data(
-        self,
-        questions: List[Any],
-        answers: List[Answer],
-        embedding_datas: List[Any],
-        session_ids: List[Optional[str]],
-        **kwargs,
+            self,
+            questions: List[Any],
+            answers: List[Answer],
+            embedding_datas: List[Any],
+            session_ids: List[Optional[str]],
+            **kwargs,
     ):
         if (
-            len(questions) != len(answers)
-            or len(questions) != len(embedding_datas)
-            or len(questions) != len(session_ids)
+                len(questions) != len(answers)
+                or len(questions) != len(embedding_datas)
+                or len(questions) != len(session_ids)
         ):
             raise ParamError("Make sure that all parameters have the same length")
         cache_datas = []
@@ -339,7 +339,7 @@ class SSDataManager(DataManager):
             ],
             **kwargs,
         )
-        self.eviction_base.put(ids)
+        self.eviction_base.put([(ids[0], (answers[0].latency, answers[0].length))])  # pair of (id, (latency, length))
 
     def get_scalar_data(self, res_data, **kwargs) -> Optional[CacheData]:
         session = kwargs.get("session", None)
@@ -358,7 +358,7 @@ class SSDataManager(DataManager):
                 r.session_question for r in res_list
             ]
             if not session.check_hit_func(
-                session.name, cache_session_ids, cache_questions, cache_answer
+                    session.name, cache_session_ids, cache_questions, cache_answer
             ):
                 return None
 
@@ -395,13 +395,13 @@ class SSDataManager(DataManager):
         self.s.delete_session(keys)
 
     def report_cache(
-        self,
-        user_question,
-        cache_question,
-        cache_question_id,
-        cache_answer,
-        similarity_value,
-        cache_delta_time,
+            self,
+            user_question,
+            cache_question,
+            cache_question_id,
+            cache_answer,
+            similarity_value,
+            cache_delta_time,
     ):
         self.s.report_cache(
             user_question,
