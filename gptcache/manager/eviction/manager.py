@@ -18,7 +18,7 @@ class EvictionBase:
     @staticmethod
     def get(
         name: str,
-        policy: str = "LRU",
+        policy: str = "LFU",
         maxsize: int = 1000,
         clean_size: int = 0,
         on_evict: Callable[[List[Any]], None] = None,

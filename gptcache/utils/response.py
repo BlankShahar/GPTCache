@@ -3,7 +3,7 @@ import requests
 
 
 def get_message_from_openai_answer(openai_resp):
-    return openai_resp["choices"][0]["message"]["content"]
+    return openai_resp["choices"][0]["message"]["content"], openai_resp['gptcache_meta']['llm_time_s']
 
 
 def get_message_from_openai_answer2(openai_resp):

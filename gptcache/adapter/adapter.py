@@ -262,6 +262,21 @@ def adapt(llm_handler, cache_data_convert, update_cache_callback, *args, **kwarg
     if not llm_data:
         return None
 
+    # ---- Add meta to MISS (or propagate from nested) ----
+    _total_elapsed = time.time() - start_time
+    if isinstance(llm_data, dict):
+        meta = llm_data.get("gptcache_meta", {})
+        if "llm_time_s" not in meta:
+            # If this frame actually called the LLM, _llm_elapsed exists
+            try:
+                meta["llm_time_s"] = round(_llm_elapsed, 6)
+                meta["hit"] = False
+            except NameError:
+                # Came from a deeper adapt() (possibly already set meta)
+                pass
+        meta["total_time_s"] = round(_total_elapsed, 6)
+        llm_data["gptcache_meta"] = meta
+
     if cache_enable:
         try:
 
@@ -294,21 +309,6 @@ def adapt(llm_handler, cache_data_convert, update_cache_callback, *args, **kwarg
             )
         except Exception as e:  # pylint: disable=W0703
             gptcache_log.warning("failed to save the data to cache, error: %s", e)
-
-    # ---- Add meta to MISS (or propagate from nested) ----
-    _total_elapsed = time.time() - start_time
-    if isinstance(llm_data, dict):
-        meta = llm_data.get("gptcache_meta", {})
-        if "llm_time_s" not in meta:
-            # If this frame actually called the LLM, _llm_elapsed exists
-            try:
-                meta["llm_time_s"] = round(_llm_elapsed, 6)
-                meta["hit"] = False
-            except NameError:
-                # Came from a deeper adapt() (possibly already set meta)
-                pass
-        meta["total_time_s"] = round(_total_elapsed, 6)
-        llm_data["gptcache_meta"] = meta
 
     return llm_data
 

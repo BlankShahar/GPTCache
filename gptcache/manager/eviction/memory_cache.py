@@ -1,4 +1,4 @@
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Tuple
 
 import cachetools
 
@@ -54,9 +54,10 @@ class MemoryCacheEviction(EvictionBase):
 
         self._cache.popitem = popitem_wrapper(self._cache.popitem, on_evict, clean_size)
 
-    def put(self, objs: List[Any]):
+    def put(self, objs: List[Tuple[int, Tuple[float, int]]]):
         for obj in objs:
-            self._cache[obj] = True
+            if isinstance(obj, tuple):
+                self._cache[obj[0]] = objs[1]  # id to a pair of (latency, length)
 
     def get(self, obj: Any):
         return self._cache.get(obj)

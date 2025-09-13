@@ -159,7 +159,7 @@ class ChatCompletion(openai.ChatCompletion, BaseCacheLLM):
             return hook_openai_data(llm_data)
         elif not isinstance(llm_data, Iterator):
             update_cache_func(
-                Answer(get_message_from_openai_answer(llm_data), DataType.STR)
+                Answer(*get_message_from_openai_answer(llm_data), DataType.STR)
             )
             return llm_data
         else:
