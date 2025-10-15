@@ -12,7 +12,8 @@ __all__ = [
     "CohereRerankEvaluation",
     "SequenceMatchEvaluation",
     "TimeEvaluation",
-    "SbertCrossencoderEvaluation"
+    "SbertCrossencoderEvaluation",
+    "AdvancedCorrectnessEvaluation"
 ]
 
 from gptcache.utils.lazy_import import LazyImport
@@ -42,6 +43,10 @@ time = LazyImport(
 
 sbert_crossencoder = LazyImport(
     "sbert_crossencoder", globals(), "gptcache.similarity_evaluation.sbert_crossencoder"
+)
+
+advanced_correctness = LazyImport(
+    "advanced_correctness", globals(), "gptcache.similarity_evaluation.advanced_correctness"
 )
 
 def OnnxModelEvaluation(model="GPTCache/albert-duplicate-onnx"):
@@ -77,3 +82,25 @@ def TimeEvaluation(evaluation: str, evaluation_config: Dict[str, Any], time_rang
 
 def SbertCrossencoderEvaluation(model: str = "cross-encoder/quora-distilroberta-base"):
     return sbert_crossencoder.SbertCrossencoderEvaluation(model)
+
+
+def AdvancedCorrectnessEvaluation(
+    semantic_weight: float = 1.0,
+    factual_weight: float = 1.0,
+    contextual_weight: float = 1.0,
+    tone_weight: float = 1.0,
+    instruction_weight: float = 1.0,
+    use_minimum: bool = True,
+    threshold: float = 0.7,
+    **kwargs
+):
+    return advanced_correctness.AdvancedCorrectnessEvaluation(
+        semantic_weight=semantic_weight,
+        factual_weight=factual_weight,
+        contextual_weight=contextual_weight,
+        tone_weight=tone_weight,
+        instruction_weight=instruction_weight,
+        use_minimum=use_minimum,
+        threshold=threshold,
+        **kwargs
+    )
