@@ -1,0 +1,422 @@
+{
+  "dataset_info": {
+    "name": "Advanced Correctness Evaluation Dataset",
+    "version": "1.0",
+    "description": "Comprehensive test dataset for evaluating multi-dimensional cache correctness",
+    "total_entries": 35,
+    "categories": {
+      "paraphrased_pairs": 7,
+      "context_dependent_sequences": 8,
+      "subtle_factual_variations": 6,
+      "instructional_variations": 8,
+      "true_negatives": 6
+    },
+    "correctness_dimensions_tested": [
+      "semantic_equivalence",
+      "factual_consistency", 
+      "contextual_relevance",
+      "tone_style_preservation",
+      "instruction_adherence"
+    ]
+  },
+  "test_entries": [
+    {
+      "category": "paraphrased_pairs",
+      "test_id": "pp_001",
+      "query": "What's the capital of France?",
+      "ground_truth_answer": "Paris is the capital of France.",
+      "paraphrase_query": "Which city serves as France's capital?",
+      "expected_cache_behavior": "hit",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "paraphrasing_basic_factual"
+    },
+    {
+      "category": "paraphrased_pairs", 
+      "test_id": "pp_002",
+      "query": "How do I make chocolate chip cookies?",
+      "ground_truth_answer": "To make chocolate chip cookies: 1) Cream butter and sugars, 2) Add eggs and vanilla, 3) Mix in flour, baking soda, and salt, 4) Fold in chocolate chips, 5) Bake at 375°F for 9-11 minutes.",
+      "paraphrase_query": "What's the recipe for chocolate chip cookies?",
+      "expected_cache_behavior": "hit",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "paraphrasing_procedural"
+    },
+    {
+      "category": "paraphrased_pairs",
+      "test_id": "pp_003", 
+      "query": "Explain machine learning in simple terms",
+      "ground_truth_answer": "Machine learning is a method of teaching computers to learn patterns from data without being explicitly programmed for each specific task. It's like showing a computer thousands of photos of cats and dogs so it can eventually recognize cats and dogs in new photos on its own.",
+      "paraphrase_query": "Can you describe machine learning for beginners?",
+      "expected_cache_behavior": "hit",
+      "correctness_dimensions": ["semantic_equivalence", "tone_style_preservation"],
+      "metadata_tag": "paraphrasing_conceptual_explanation"
+    },
+    {
+      "category": "paraphrased_pairs",
+      "test_id": "pp_004",
+      "query": "What are the symptoms of COVID-19?",
+      "ground_truth_answer": "Common COVID-19 symptoms include fever, cough, shortness of breath, fatigue, body aches, headache, loss of taste or smell, sore throat, and congestion. Symptoms can range from mild to severe.",
+      "paraphrase_query": "What signs indicate someone might have COVID-19?",
+      "expected_cache_behavior": "hit",
+      "correctness_dimensions": ["semantic_equivalence", "factual_consistency"],
+      "metadata_tag": "paraphrasing_medical_factual"
+    },
+    {
+      "category": "paraphrased_pairs",
+      "test_id": "pp_005",
+      "query": "How do solar panels work?",
+      "ground_truth_answer": "Solar panels work by converting sunlight into electricity through photovoltaic cells. When sunlight hits these cells, it knocks electrons loose from atoms, creating an electric current that flows through the panel's wiring system.",
+      "paraphrase_query": "What's the mechanism behind solar panel electricity generation?",
+      "expected_cache_behavior": "hit",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "paraphrasing_technical_explanation"
+    },
+    {
+      "category": "paraphrased_pairs",
+      "test_id": "pp_006",
+      "query": "Best restaurants in New York City",
+      "ground_truth_answer": "Some top-rated NYC restaurants include Le Bernardin (seafood), Eleven Madison Park (fine dining), Katz's Delicatessen (deli), Joe's Pizza (pizza), and Peter Luger (steakhouse). The city offers incredible diversity across all price ranges and cuisines.",
+      "paraphrase_query": "Top places to eat in NYC",
+      "expected_cache_behavior": "hit",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "paraphrasing_recommendation_query"
+    },
+    {
+      "category": "paraphrased_pairs", 
+      "test_id": "pp_007",
+      "query": "Convert 100 degrees Fahrenheit to Celsius",
+      "ground_truth_answer": "100°F equals 37.78°C. The formula is: (°F - 32) × 5/9 = °C",
+      "paraphrase_query": "What is 100°F in Celsius?",
+      "expected_cache_behavior": "hit",
+      "correctness_dimensions": ["semantic_equivalence", "factual_consistency"],
+      "metadata_tag": "paraphrasing_calculation"
+    },
+    {
+      "category": "context_dependent_sequences",
+      "test_id": "cd_001",
+      "sequence": [
+        {
+          "turn": 1,
+          "query": "Tell me about Python programming language",
+          "ground_truth_answer": "Python is a high-level, interpreted programming language known for its simple and readable syntax. Created by Guido van Rossum in 1991, it's widely used for web development, data analysis, artificial intelligence, automation, and scientific computing.",
+          "expected_cache_behavior": "miss"
+        },
+        {
+          "turn": 2,
+          "query": "What are its main advantages?",
+          "ground_truth_answer": "Python's main advantages include: 1) Easy to learn and read syntax, 2) Extensive library ecosystem, 3) Cross-platform compatibility, 4) Strong community support, 5) Versatility for multiple programming domains, 6) Rapid development and prototyping capabilities.",
+          "expected_cache_behavior": "context_dependent_hit",
+          "context_dependency": "Refers to Python from previous turn"
+        }
+      ],
+      "correctness_dimensions": ["contextual_relevance", "semantic_equivalence"],
+      "metadata_tag": "context_dependency_programming"
+    },
+    {
+      "category": "context_dependent_sequences",
+      "test_id": "cd_002", 
+      "sequence": [
+        {
+          "turn": 1,
+          "query": "I'm planning a trip to Japan",
+          "ground_truth_answer": "That's exciting! Japan offers incredible experiences from bustling cities like Tokyo and Osaka to cultural sites in Kyoto, natural beauty like Mount Fuji, and unique cuisine. When are you planning to visit?",
+          "expected_cache_behavior": "miss"
+        },
+        {
+          "turn": 2,
+          "query": "What's the best time to visit?",
+          "ground_truth_answer": "The best times to visit Japan are spring (March-May) for cherry blossoms and mild weather, or fall (September-November) for beautiful autumn colors and comfortable temperatures. Avoid peak summer (hot and humid) and winter unless you're interested in snow activities.",
+          "expected_cache_behavior": "context_dependent_hit",
+          "context_dependency": "Refers to Japan trip from previous turn"
+        }
+      ],
+      "correctness_dimensions": ["contextual_relevance"],
+      "metadata_tag": "context_dependency_travel"
+    },
+    {
+      "category": "context_dependent_sequences",
+      "test_id": "cd_003",
+      "sequence": [
+        {
+          "turn": 1,
+          "query": "Explain photosynthesis",
+          "ground_truth_answer": "Photosynthesis is the process by which plants convert light energy (usually from the sun) into chemical energy stored in glucose. The process uses carbon dioxide from air and water from soil, releasing oxygen as a byproduct. The basic equation is: 6CO2 + 6H2O + light energy → C6H12O6 + 6O2.",
+          "expected_cache_behavior": "miss"
+        },
+        {
+          "turn": 2,
+          "query": "Where does it occur in the plant?",
+          "ground_truth_answer": "Photosynthesis occurs primarily in the leaves, specifically in the chloroplasts of plant cells. Chloroplasts contain chlorophyll, the green pigment that captures light energy. The process happens in two stages: light reactions in the thylakoids and the Calvin cycle in the stroma.",
+          "expected_cache_behavior": "context_dependent_hit",
+          "context_dependency": "Refers to photosynthesis from previous turn"
+        }
+      ],
+      "correctness_dimensions": ["contextual_relevance", "factual_consistency"],
+      "metadata_tag": "context_dependency_scientific"
+    },
+    {
+      "category": "context_dependent_sequences",
+      "test_id": "cd_004",
+      "sequence": [
+        {
+          "turn": 1,
+          "query": "I need help with my resume",
+          "ground_truth_answer": "I'd be happy to help with your resume! A strong resume typically includes: contact information, professional summary, work experience, education, and relevant skills. What specific aspect would you like assistance with?",
+          "expected_cache_behavior": "miss"
+        },
+        {
+          "turn": 2,
+          "query": "How should I format the work experience section?",
+          "ground_truth_answer": "For the work experience section: List jobs in reverse chronological order, include job title, company name, location, and dates. Use 3-4 bullet points per role describing achievements (not just duties), start with action verbs, and quantify results when possible (e.g., 'Increased sales by 25%').",
+          "expected_cache_behavior": "context_dependent_hit",
+          "context_dependency": "Refers to resume help from previous turn"
+        }
+      ],
+      "correctness_dimensions": ["contextual_relevance"],
+      "metadata_tag": "context_dependency_career_advice"
+    },
+    {
+      "category": "subtle_factual_variations",
+      "test_id": "sfv_001",
+      "query": "What's the population of New York City?",
+      "ground_truth_answer": "New York City's population is approximately 8.3 million people as of 2023.",
+      "similar_query": "What's the population of New York State?",
+      "different_ground_truth": "New York State's population is approximately 19.5 million people as of 2023.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "subtle_factual_geographic_scope"
+    },
+    {
+      "category": "subtle_factual_variations",
+      "test_id": "sfv_002",
+      "query": "When was the iPhone first released?",
+      "ground_truth_answer": "The original iPhone was first released on June 29, 2007.",
+      "similar_query": "When was the iPhone 12 first released?", 
+      "different_ground_truth": "The iPhone 12 was first released on October 23, 2020.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "subtle_factual_product_version"
+    },
+    {
+      "category": "subtle_factual_variations",
+      "test_id": "sfv_003",
+      "query": "What's the boiling point of water at sea level?",
+      "ground_truth_answer": "Water boils at 100°C (212°F) at sea level under standard atmospheric pressure.",
+      "similar_query": "What's the boiling point of water at high altitude?",
+      "different_ground_truth": "At high altitude, water boils at lower temperatures due to reduced atmospheric pressure. For example, at 5,000 feet elevation, water boils at approximately 94°C (201°F).",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "subtle_factual_environmental_conditions"
+    },
+    {
+      "category": "subtle_factual_variations",
+      "test_id": "sfv_004",
+      "query": "Who wrote Pride and Prejudice?",
+      "ground_truth_answer": "Jane Austen wrote Pride and Prejudice, published in 1813.",
+      "similar_query": "Who wrote Sense and Sensibility?",
+      "different_ground_truth": "Jane Austen wrote Sense and Sensibility, published in 1811.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "subtle_factual_similar_works"
+    },
+    {
+      "category": "subtle_factual_variations",
+      "test_id": "sfv_005", 
+      "query": "What's the capital of Australia?",
+      "ground_truth_answer": "Canberra is the capital of Australia.",
+      "similar_query": "What's the largest city in Australia?",
+      "different_ground_truth": "Sydney is the largest city in Australia by population.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "subtle_factual_capital_vs_largest"
+    },
+    {
+      "category": "subtle_factual_variations",
+      "test_id": "sfv_006",
+      "query": "How many strings does a standard guitar have?",
+      "ground_truth_answer": "A standard guitar has 6 strings.",
+      "similar_query": "How many strings does a bass guitar have?",
+      "different_ground_truth": "A standard bass guitar has 4 strings, though 5-string and 6-string bass guitars also exist.",
+      "expected_cache_behavior": "miss", 
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "subtle_factual_instrument_variation"
+    },
+    {
+      "category": "instructional_variations",
+      "test_id": "iv_001",
+      "base_query": "Benefits of regular exercise",
+      "variations": [
+        {
+          "query": "List the benefits of regular exercise",
+          "ground_truth_answer": "• Improves cardiovascular health\n• Strengthens muscles and bones\n• Enhances mental health and mood\n• Helps maintain healthy weight\n• Boosts immune system\n• Increases energy levels\n• Improves sleep quality",
+          "instruction_type": "bulleted_list"
+        },
+        {
+          "query": "Summarize the benefits of regular exercise",
+          "ground_truth_answer": "Regular exercise provides numerous health benefits including improved cardiovascular health, stronger muscles and bones, better mental health, weight management, enhanced immune function, increased energy, and better sleep quality.",
+          "instruction_type": "summary_paragraph"
+        },
+        {
+          "query": "Explain the top 3 benefits of regular exercise",
+          "ground_truth_answer": "The top 3 benefits of regular exercise are: 1) Cardiovascular health improvement through strengthened heart muscle and better circulation, 2) Mental health enhancement through endorphin release and stress reduction, and 3) Weight management through increased calorie burn and improved metabolism.",
+          "instruction_type": "numbered_top_items"
+        }
+      ],
+      "expected_cache_behavior": "miss_between_variations",
+      "correctness_dimensions": ["instruction_adherence"],
+      "metadata_tag": "instructional_variations_format"
+    },
+    {
+      "category": "instructional_variations",
+      "test_id": "iv_002",
+      "base_query": "Steps to change a car tire",
+      "variations": [
+        {
+          "query": "Give me step-by-step instructions to change a car tire",
+          "ground_truth_answer": "1. Pull over safely and engage parking brake\n2. Get spare tire, jack, and lug wrench from trunk\n3. Loosen lug nuts (don't remove completely)\n4. Jack up the car until flat tire is off ground\n5. Remove lug nuts and pull tire toward you\n6. Mount spare tire and replace lug nuts\n7. Lower car and tighten lug nuts fully\n8. Store flat tire and equipment",
+          "instruction_type": "numbered_steps"
+        },
+        {
+          "query": "Briefly describe how to change a car tire",
+          "ground_truth_answer": "To change a car tire: safely pull over, loosen lug nuts, jack up the car, remove the flat tire, mount the spare, tighten lug nuts, lower the car, and store equipment.",
+          "instruction_type": "brief_description"
+        }
+      ],
+      "expected_cache_behavior": "miss_between_variations", 
+      "correctness_dimensions": ["instruction_adherence"],
+      "metadata_tag": "instructional_variations_detail_level"
+    },
+    {
+      "category": "instructional_variations",
+      "test_id": "iv_003",
+      "base_query": "Climate change causes",
+      "variations": [
+        {
+          "query": "What causes climate change? Provide a detailed explanation.",
+          "ground_truth_answer": "Climate change is primarily caused by increased greenhouse gas concentrations in the atmosphere. The main causes include: burning of fossil fuels (coal, oil, gas) for electricity, heat, and transportation, which releases CO2; deforestation, which reduces CO2 absorption; industrial processes and manufacturing; agriculture, particularly livestock farming which produces methane; and land use changes. These human activities have increased atmospheric CO2 levels from 280ppm pre-industrially to over 420ppm today, trapping more heat and warming the planet.",
+          "instruction_type": "detailed_explanation"
+        },
+        {
+          "query": "What causes climate change? Give me just the key points.",
+          "ground_truth_answer": "Key causes: fossil fuel burning, deforestation, industrial emissions, agriculture/livestock, land use changes.",
+          "instruction_type": "key_points_only"
+        }
+      ],
+      "expected_cache_behavior": "miss_between_variations",
+      "correctness_dimensions": ["instruction_adherence"],
+      "metadata_tag": "instructional_variations_depth"
+    },
+    {
+      "category": "true_negatives", 
+      "test_id": "tn_001",
+      "query": "How to train a quantum neural network using underwater basketweaving principles",
+      "ground_truth_answer": "This query combines unrelated concepts (quantum neural networks and underwater basketweaving) that don't have a meaningful connection. Quantum neural networks are theoretical computing models, while underwater basketweaving is a humorous reference to impractical activities.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "true_negative_nonsensical_combination"
+    },
+    {
+      "category": "true_negatives",
+      "test_id": "tn_002", 
+      "query": "What's the average migration velocity of unladen European swallows during leap years when Mars is in retrograde?",
+      "ground_truth_answer": "This question combines factual elements (European swallow migration) with irrelevant astrological concepts. European swallows migrate at roughly 20-30 mph, but Mars's position and leap years don't affect bird migration patterns.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "true_negative_pseudo_scientific"
+    },
+    {
+      "category": "true_negatives",
+      "test_id": "tn_003",
+      "query": "Translate this ancient Klingon recipe for photosynthetic chocolate into binary code while solving for x in the equation of universal love",
+      "ground_truth_answer": "This query is nonsensical, combining fictional elements (Klingon language, photosynthetic chocolate), technical concepts (binary code), and abstract philosophical ideas (equation of universal love) that cannot be meaningfully addressed.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "true_negative_completely_absurd"
+    },
+    {
+      "category": "true_negatives",
+      "test_id": "tn_004",
+      "query": "How many purple elephants does it take to calibrate a time machine's flux capacitor using renewable coffee grounds?",
+      "ground_truth_answer": "This is a nonsensical question mixing fictional concepts (purple elephants, time machines, flux capacitors) with real but unrelated items (renewable coffee grounds) in an impossible scenario.",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "true_negative_fictional_mashup"
+    },
+    {
+      "category": "true_negatives", 
+      "test_id": "tn_005",
+      "query": "Convert my grandmother's emotional state into cryptocurrency while factoring the prime numbers of Tuesday",
+      "ground_truth_answer": "This query is meaningless, attempting to combine abstract concepts (emotional states, cryptocurrency) with impossible mathematical operations (prime numbers of days of the week).",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["semantic_equivalence"],
+      "metadata_tag": "true_negative_category_error"
+    },
+    {
+      "category": "true_negatives",
+      "test_id": "tn_006",
+      "query": "What's the metabolic rate of unicorns when they're solving differential equations in their dreams?",
+      "ground_truth_answer": "This question is impossible to answer as it references mythical creatures (unicorns) performing abstract mathematical tasks (solving differential equations) in an impossible context (dreams with metabolic implications).",
+      "expected_cache_behavior": "miss",
+      "correctness_dimensions": ["factual_consistency"],
+      "metadata_tag": "true_negative_mythical_impossible"
+    }
+  ],
+  "evaluation_framework": {
+    "scoring_dimensions": {
+      "semantic_equivalence": {
+        "range": [0.0, 1.0],
+        "threshold_excellent": 0.9,
+        "threshold_acceptable": 0.7,
+        "description": "Measures meaning preservation between queries and cached responses"
+      },
+      "factual_consistency": {
+        "range": [0.0, 1.0], 
+        "threshold_excellent": 0.9,
+        "threshold_acceptable": 0.7,
+        "description": "Measures accuracy of facts, entities, and relationships"
+      },
+      "contextual_relevance": {
+        "range": [0.0, 1.0],
+        "threshold_excellent": 0.9, 
+        "threshold_acceptable": 0.7,
+        "description": "Measures appropriate use of conversation context and history"
+      },
+      "tone_style_preservation": {
+        "range": [0.0, 1.0],
+        "threshold_excellent": 0.9,
+        "threshold_acceptable": 0.7,
+        "description": "Measures consistency of voice, formality, and stylistic elements"
+      },
+      "instruction_adherence": {
+        "range": [0.0, 1.0],
+        "threshold_excellent": 0.9,
+        "threshold_acceptable": 0.7,
+        "description": "Measures compliance with formatting and procedural requirements"
+      }
+    },
+    "overall_correctness": {
+      "calculation": "minimum score across all applicable dimensions",
+      "thresholds": {
+        "excellent": 0.9,
+        "acceptable": 0.7,
+        "poor": "<0.7"
+      }
+    }
+  },
+  "usage_instructions": {
+    "testing_procedure": [
+      "1. Initialize cache with baseline entries using ground_truth_answers",
+      "2. Query cache with test queries from each category", 
+      "3. Evaluate returned responses across applicable correctness dimensions",
+      "4. Compare actual cache behavior with expected_cache_behavior",
+      "5. Calculate precision, recall, and correctness scores by category"
+    ],
+    "success_criteria": {
+      "paraphrased_pairs": "Should achieve >90% cache hit rate with >0.7 semantic equivalence",
+      "context_dependent": "Should correctly use conversation context in multi-turn scenarios",
+      "factual_variations": "Should avoid false hits on factually different queries", 
+      "instructional_variations": "Should miss when format requirements differ",
+      "true_negatives": "Should achieve 100% cache miss rate"
+    }
+  }
+}
+
