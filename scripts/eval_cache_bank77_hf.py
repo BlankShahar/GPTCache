@@ -1,291 +1,108 @@
 """
 scripts/eval_cache_bank77_hf.py
-----------------------------------------------------------------------
+-------------------------------------
 
-Purpose
-  Evaluate LLM response caching on BANKING77 using intent–paraphrase queries.
-  The script simulates an online request stream, measures cache quality/savings,
-  and compares eviction and similarity strategies.
+Evaluate GPTCache on BANKING77 with intent–paraphrase queries.
+Replaces custom vector cache with GPTCache's built-in API:
 
-What this script does
-  • Loads BANKING77 via 🤗 Datasets (or a K×M sampler that forces repeats).
-  • Treats each intent as a class with a canonical (model-generated) answer.
-  • For each query:
-      – If a semantically similar request is in cache above a threshold → HIT.
-      – Otherwise → MISS: call the chosen LLM provider, cache the answer.
-  • Reports precision/recall of hits, false-hit rate, and latency savings.
+  • Cache init: embedding_func, FAISS vector store, eviction policy & capacity.
+  • Similarity decision: GPTCache similarity_evaluation (+ global threshold).
+  • LLM calls: via gptcache.adapter.openai → works with Ollama's OAI-compatible API.
 
-Key knobs (CLI flags)
-  --policies         Eviction policy: LRU / LFU (compare multiple in one run).
-  --capacity         Max cache entries.
-  --sim-eval         Similarity evaluator for hit decision:
-                       - cosine      : cosine similarity on sentence embeddings
-                       - exact       : GPTCache ExactMatchEvaluation
-                       - np          : GPTCache NumpyNormEvaluation
-                       - distance    : GPTCache SearchDistanceEvaluation
-                       - sbert       : GPTCache SbertCrossencoderEvaluation
-                       - onnx        : GPTCache OnnxModelEvaluation
-                       - cohere      : GPTCache CohereRerankEvaluation
-                     All evaluators are normalized to [0,1] so thresholds are comparable.
-  --thresholds       One or more thresholds (e.g., 0.65 0.75 0.85).
-  --embedder         Sentence-Transformers model for embedding-based evaluators
-                     (default: sentence-transformers/all-MiniLM-L6-v2).
-  --provider         Backend used on MISSes:
-                       sim | gemini | hf | ollama
-                     sim     = sleep-only (no external calls)
-                     gemini  = Google Gemini via google-generativeai
-                     hf      = Hugging Face Inference API (serverless)
-                     ollama  = Local OpenAI-compatible server (http://localhost:11434)
-  --rpm              Simple per-process rate limiter for API providers (calls/min).
-  --km-intents / --km-per-intent
-                     Use a controlled K×M sampler (K intents × M paraphrases each)
-                     to guarantee repeat queries (i.e., realistic hit opportunities).
-  --seed             RNG seed for reproducible sampling/shuffle.
+Metrics reported (per policy × threshold):
+  - Should-Hit: queries whose intent has been seen earlier in the stream.
+  - Hits: GPTCache-reported cache hits.
+  - Hit-Recall: hits / should_hit.
+  - False-Hit (lower bound): hits that occur before the first time that intent appeared.
+  - Avg LLM time (on GPT-backed responses only, from gptcache_meta.llm_time_s).
+  - Avg cache time (lookup time per query, from total_time_s - llm_time_s).
+  - Hit Rate, LLM call count.
 
-Printed metrics
-  Precision        = correct_hits / hits
-  Hit-Recall       = hits / should_hit
-  Correct-Recall   = correct_hits / should_hit
-  False-Hit-Rate   = (hits - correct_hits) / should_hit
-  Avg LLM time     = mean latency over actual LLM calls (misses + false hits)
-  Avg cache time   = mean latency of cache lookups per query
+Notes
+  * Policies supported by GPTCache today: LRU, FIFO. (LFU is not provided.) [docs]
+  * Threshold is configured via Config(similarity_threshold=...).
+  * For "cosine"-like behavior, we map to NumpyNormEvaluation(enable_normal=True),
+    which normalizes embeddings so L2-distance is monotonic with cosine similarity.
 
-How thresholds work
-  • cosine: directly the cosine score in [0,1].
-  • exact / np / distance / sbert / onnx / cohere: raw evaluator scores are
-    mapped to [0,1] using the evaluator’s reported range() so a single threshold
-    value is comparable across evaluators.
-
-Quick examples
-  # 1) Fast baseline: cosine + Ollama, compare LRU vs LFU
-  python scripts/eval_cache_bank77_hf.py \
-    --provider ollama --policies lru lfu --capacity 64 --thresholds 0.65 0.75 \
-    --km-intents 8 --km-per-intent 5
-
-  # 2) SBERT cross-encoder similarity (heavier but often stronger)
-  python scripts/eval_cache_bank77_hf.py \
-    --sim-eval sbert --sbert-model cross-encoder/quora-distilroberta-base \
-    --provider sim --thresholds 0.75 --limit 200
-
-  # 3) ONNX similarity model (offline)
-  python scripts/eval_cache_bank77_hf.py \
-    --sim-eval onnx --onnx-model GPTCache/albert-duplicate-onnx \
-    --provider sim --thresholds 0.7
-
-  # 4) Hugging Face Inference API (set HF_TOKEN)
-  python scripts/eval_cache_bank77_hf.py \
-    --provider hf --rpm 10 --thresholds 0.7 --limit 50
-
-  # 5) Gemini free tier (set GOOGLE_API_KEY) with rate limiting
-  python scripts/eval_cache_bank77_hf.py \
-    --provider gemini --rpm 8 --thresholds 0.7 --km-intents 6 --km-per-intent 4
-
-Environment variables (.env supported)
-  # Providers
-  GOOGLE_API_KEY=<your_gemini_key>
-  HF_TOKEN=<your_huggingface_inference_token>
-  HF_MODEL=HuggingFaceH4/zephyr-7b-beta            # optional override
-  HF_API_URL=https://api-inference.huggingface.co/models/${HF_MODEL}
-  COHERE_API_KEY=<optional_if_using_cohere_evaluator>
-
-  # Ollama (local) – no key needed; ensure the server is running:
-  #   ollama serve
-  # And that a chat model is pulled, e.g.:
-  #   ollama pull llama3.1:8b
-
-Dependencies
-  pip install -U \
-    datasets sentence-transformers scikit-learn torch \
-    gptcache python-dotenv
-  # Optional depending on usage:
-  pip install google-generativeai requests cohere onnxruntime
-
-Notes & tips
-  • SBERT/ONNX/Cohere evaluators are slower than cosine; use them for
-    quality comparisons rather than throughput baselines.
-  • Cohere rerank calls an external API per candidate → keep cache small
-    or expect high latency and rate limits.
-  • Free-tier providers have strict RPM/DPQ. Use --rpm to avoid 429s.
-  • For Windows + conda, ensure a CPU-compatible torch wheel is installed.
+References:
+  - GPTCache Quick Start & Manager config (capacity/eviction): see docs. 
+  - Evaluators: ExactMatch, NumpyNorm, SearchDistance, SBERT, ONNX, Cohere.
+  - OpenAI adapter wrapper and gptcache_meta fields (hit, llm_time_s, total_time_s).
 
 """
-import sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from __future__ import annotations
 
-
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
-from typing import Any, Optional
 import argparse
+import os
 import random
 import time
-import numpy as np
-import os
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
+import csv
+import sys
+from datetime import datetime
+import traceback
+# --- Hugging Face datasets & helpers (unchanged) ---
 from datasets import load_dataset
+
+# --- GPTCache core pieces ---
+from gptcache import cache
+from gptcache.config import Config
+from gptcache.processor.pre import last_content
+from gptcache.adapter import openai as cached_openai
+from gptcache.manager import manager_factory
+
+# Embedding backends (choose at CLI): ONNX or SBERT are the simplest & local
+from gptcache.embedding import Onnx as EmbOnnx
+from gptcache.embedding import SBERT as EmbSBERT
+
+# Similarity evaluators — pick via --sim-eval
+from gptcache.similarity_evaluation import (
+    ExactMatchEvaluation,
+    NumpyNormEvaluation,
+    SearchDistanceEvaluation,
+    SbertCrossencoderEvaluation,
+    OnnxModelEvaluation,
+    CohereRerankEvaluation,
+    KReciprocalEvaluation,
+)
+
+# Answer correctness judge dependencies
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+from gptcache.utils.error import NotInitError
+
+# DEBUG LOGGING: show the real error behind "failed to save"
+import logging
+logging.getLogger("gptcache").setLevel(logging.DEBUG)
+os.environ["GPTCACHE_LOG_LEVEL"] = "DEBUG"
+os.environ["SQLALCHEMY_ECHO"] = "1"
 
 
-# --- silence noisy deprecation warnings from transformers/torch ---
+# --- Silence noisy transformers/torch warnings for cleaner logs ---
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
-
-# Reduce Hugging Face transformers log verbosity (errors only)
 try:
     from transformers.utils import logging as hf_logging
     hf_logging.set_verbosity_error()
 except Exception:
     pass
 
-from providers import get_provider
 
-
-# ----------------------------
-# Simple per-process rate limiter
-# ----------------------------
-class RateLimiter:
-    """Simple per-process rate limiter: at most `rpm` calls/minute."""
-    def __init__(self, rpm: float):
-        self.interval = 60.0 / max(1.0, float(rpm))
-        self.last = 0.0
-
-    def wait(self):
-        now = time.time()
-        delta = now - self.last
-        if delta < self.interval:
-            time.sleep(self.interval - delta)
-        self.last = time.time()
-
-
-# ----------------------------
-# GPTCache similarity evaluator helpers
-# ----------------------------
-try:
-    from gptcache.similarity_evaluation import (
-        ExactMatchEvaluation,
-        NumpyNormEvaluation,
-        SearchDistanceEvaluation,
-        SbertCrossencoderEvaluation,
-        OnnxModelEvaluation,
-        CohereRerankEvaluation,
-    )
-except Exception:
-    ExactMatchEvaluation = NumpyNormEvaluation = SearchDistanceEvaluation = None
-    SbertCrossencoderEvaluation = OnnxModelEvaluation = CohereRerankEvaluation = None
-
-
-def _build_gptcache_evaluator(
-    name: str,
-    *,
-    sbert_model: str = "cross-encoder/quora-distilroberta-base",
-    onnx_model: str = "GPTCache/albert-duplicate-onnx",
-    cohere_model: str = "rerank-english-v2.0",
-    cohere_api_key: Optional[str] = None,
-    distance_max: float = 2.0,
-    distance_positive: bool = False,
-):
-    """
-    Create a GPTCache SimilarityEvaluation by name.
-    Returns (evaluator, (min_score, max_score)).
-    """
-    name = name.lower()
-    if name == "exact":
-        from gptcache.similarity_evaluation import ExactMatchEvaluation as _Exact
-        ev = _Exact()
-    elif name == "np":
-        from gptcache.similarity_evaluation import NumpyNormEvaluation as _Np
-        ev = _Np(enable_normal=True)
-    elif name == "distance":
-        from gptcache.similarity_evaluation import SearchDistanceEvaluation as _Dist
-        ev = _Dist(max_distance=distance_max, positive=distance_positive)
-    elif name == "sbert":
-        from gptcache.similarity_evaluation import SbertCrossencoderEvaluation as _Sbert
-        ev = _Sbert(model=sbert_model)
-    elif name == "onnx":
-        from gptcache.similarity_evaluation import OnnxModelEvaluation as _Onnx
-        ev = _Onnx(model=onnx_model)
-    elif name == "cohere":
-        if not cohere_api_key:
-            raise ValueError(
-                "Cohere reranker selected but no API key provided. "
-                "Pass --cohere-api-key or set COHERE_API_KEY."
-            )
-        from gptcache.similarity_evaluation import CohereRerankEvaluation as _Cohere
-        ev = _Cohere(model=cohere_model, api_key=cohere_api_key)
-    elif name == "cosine":
-        return None, (0.0, 1.0)
-    else:
-        raise ValueError(f"Unknown --sim-eval '{name}'. Choose from cosine|exact|np|distance|sbert|onnx|cohere")
-
-    try:
-        rmin, rmax = ev.range()
-    except Exception:
-        rmin, rmax = (0.0, 1.0)
-    return ev, (float(rmin), float(rmax))
-
-
-def _normalize_score(score: float, rmin: float, rmax: float) -> float:
-    """Map raw evaluator score to [0,1] for consistent thresholds."""
-    if rmax <= rmin:
-        return 0.0
-    x = (score - rmin) / (rmax - rmin)
-    return 0.0 if x < 0.0 else 1.0 if x > 1.0 else float(x)
-
-
-# ----------------------------
-# VectorQ per-entry stats
-# ----------------------------
-class VQStats:
-    def __init__(self, bins: int = 20, alpha: float = 1.0, beta: float = 1.0):
-        self.bins = int(bins)
-        self.pos = np.zeros(self.bins, dtype=np.int32)
-        self.tot = np.zeros(self.bins, dtype=np.int32)
-        self.alpha = float(alpha)
-        self.beta = float(beta)
-
-    def bin_idx(self, s: float) -> int:
-        i = int(min(self.bins - 1, max(0, s * self.bins)))
-        return i
-
-    def update(self, s: float, correct: int) -> None:
-        i = self.bin_idx(s)
-        self.tot[i] += 1
-        if correct:
-            self.pos[i] += 1
-
-    def est_p(self, s: float) -> float:
-        i = self.bin_idx(s)
-        return (self.pos[i] + self.alpha) / (self.tot[i] + self.alpha + self.beta)
-
-    def confident(self, s: float, min_count: int = 5, target: float = 0.9) -> Optional[bool]:
-        i = self.bin_idx(s)
-        if self.tot[i] < int(min_count):
-            return None
-        return bool(self.est_p(s) >= float(target))
-
-
-# ----------------------------
-# Data model
-# ----------------------------
+# =========================
+# Data loading (BANKING77)
+# =========================
 @dataclass
 class Example:
     text: str
     intent: str
 
-
 def load_banking77(split: str = "train", limit: int = 0, seed: int = 42) -> List[Example]:
     """
-    Load BANKING77 in a way compatible with datasets>=4:
-      1) Preferred: Parquet mirror `mteb/banking77` (columns: 'text', 'label', 'label_text').
-      2) Fallback: try `PolyAI/banking77` on a parquet conversion branch if present.
-
-    Args:
-      split: "train" or "test"
-      limit: if > 0, subsample to N examples
-      seed:  RNG seed for reproducible subsampling/shuffle
+    Load BANKING77 via the mteb mirror (preferred), fallback to PolyAI parquet branch if needed.
+    Keeps behavior identical to your original loader.
     """
-
     def _subsample_and_shuffle(rows: List[Example]) -> List[Example]:
         if limit and limit < len(rows):
             rnd = random.Random(seed)
@@ -293,61 +110,40 @@ def load_banking77(split: str = "train", limit: int = 0, seed: int = 42) -> List
         random.Random(seed).shuffle(rows)
         return rows
 
-    # 1) Preferred: mteb/banking77 (Parquet)
     try:
         ds = load_dataset("mteb/banking77", split=split)
         if "label_text" in ds.column_names:
-            rows: List[Example] = [Example(text=rec["text"], intent=rec["label_text"]) for rec in ds]
+            rows = [Example(text=r["text"], intent=r["label_text"]) for r in ds]
         else:
-            label_names = ds.features["label"].names
-            rows = [Example(text=rec["text"], intent=label_names[int(rec["label"])]) for rec in ds]
+            names = ds.features["label"].names
+            rows = [Example(text=r["text"], intent=names[int(r["label"])]) for r in ds]
         return _subsample_and_shuffle(rows)
-    except Exception as e1:
-        # 2) Fallback: try parquet conversion branch of PolyAI/banking77 if available
-        try:
-            ds = load_dataset("PolyAI/banking77", split=split, revision="refs/convert/parquet")
-            if "label_text" in ds.column_names:
-                rows = [Example(text=rec["text"], intent=rec["label_text"]) for rec in ds]
-            else:
-                label_names = ds.features["label"].names
-                rows = [Example(text=rec["text"], intent=label_names[int(rec["label"])]) for rec in ds]
-            return _subsample_and_shuffle(rows)
-        except Exception as e2:
-            raise RuntimeError(
-                "Unable to load BANKING77 with datasets>=4. "
-                "Use the mteb/banking77 mirror (preferred) or pin datasets<4.0. "
-                f"Errors: mteb/banking77 -> {e1} | PolyAI/banking77@refs/convert/parquet -> {e2}"
-            )
+    except Exception:
+        ds = load_dataset("PolyAI/banking77", split=split, revision="refs/convert/parquet")
+        if "label_text" in ds.column_names:
+            rows = [Example(text=r["text"], intent=r["label_text"]) for r in ds]
+        else:
+            names = ds.features["label"].names
+            rows = [Example(text=r["text"], intent=names[int(r["label"])]) for r in ds]
+        return _subsample_and_shuffle(rows)
 
-
-# ----------------------------
-# K×M sampler: force repeats per intent
-# ----------------------------
 def load_banking77_k_per_intent(
-    split: str = "train",
-    num_intents: int = 10,
-    per_intent: int = 4,
-    seed: int = 42,
+    split: str = "train", num_intents: int = 10, per_intent: int = 4, seed: int = 42
 ) -> List[Example]:
     """
-    Build a stream containing `num_intents` intents and `per_intent` paraphrases each,
-    then shuffle. Ensures repeats so the cache has real hit opportunities.
+    Build a stream with `num_intents` intents and `per_intent` paraphrases each, then shuffle.
+    Guarantees repeats so the cache has real hit opportunities.
     """
     ds = load_dataset("mteb/banking77", split=split)
-
-    # Choose label field
     if "label_text" in ds.column_names:
-        def get_intent(rec):
-            return rec["label_text"]
+        def get_intent(rec): return rec["label_text"]
     else:
         names = ds.features["label"].names
-        def get_intent(rec):
-            return names[int(rec["label"])]
+        def get_intent(rec): return names[int(rec["label"])]
 
     by_intent: Dict[str, List[str]] = {}
     for rec in ds:
-        it = get_intent(rec)
-        by_intent.setdefault(it, []).append(rec["text"])
+        by_intent.setdefault(get_intent(rec), []).append(rec["text"])
 
     rng = random.Random(seed)
     intents = rng.sample(list(by_intent.keys()), min(num_intents, len(by_intent)))
@@ -357,488 +153,676 @@ def load_banking77_k_per_intent(
         take = min(per_intent, len(pool))
         for txt in rng.sample(pool, take):
             examples.append(Example(text=txt, intent=it))
-
     rng.shuffle(examples)
     return examples
 
-# ----------------------------
+
+# -------------------------
 # Canonical answers per intent
-# ----------------------------
+# -------------------------
 def build_canonical_answers(intents: List[str]) -> Dict[str, str]:
     """
-    Create a canonical answer template per intent. This keeps the script
-    self-contained; you can replace with a curated mapping if you prefer.
-
-    Example:
-      "balance" -> "Intent=balance: Here's how to handle that …"
+    Create a canonical answer for each BANKING77 intent.
     """
     canon: Dict[str, str] = {}
     for it in intents:
         canon[it] = (
-            f"[Canonical answer for intent='{it}'] "
-            f"This is a template response describing how we usually resolve '{it}'."
+            f"[Intent={it}] This is the standard resolution for '{it}'. "
+            f"Follow these steps carefully to handle '{it}'."
         )
     return canon
 
 
-# ----------------------------
-# Capacity-bounded vector cache with eviction policies
-# ----------------------------
-class EvictingVectorCache:
+# -------------------------
+# Lightweight cosine judge on raw text
+# -------------------------
+class AnswerJudge:
     """
-    A small, self-contained vector cache with LRU / LFU eviction.
-    - Each entry stores: embedding vector, (intent, answer), freq, last_access, created_at.
-    - Query performs cosine similarity against all stored vectors (small-scale friendly).
-    - Insert computes the embedding and evicts one entry if capacity is exceeded.
+    SBERT-based cosine similarity between the model's answer and the canonical answer.
+    We treat cosine >= threshold as 'correct'.
+    """
 
-    Eviction:
-      • LRU: evict the item with the smallest last_access (oldest use).
-      • LFU: evict the item with the smallest frequency; ties break by oldest last_access.
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+                 device: Optional[str] = None, threshold_cos: float = 0.60):
+        self.model = SentenceTransformer(model_name, device=device)
+        self.threshold = float(threshold_cos)
+
+    def score(self, a: str, b: str) -> float:
+        ea = self.model.encode([a], normalize_embeddings=True, convert_to_numpy=True)[0]
+        eb = self.model.encode([b], normalize_embeddings=True, convert_to_numpy=True)[0]
+        return float(np.dot(ea, eb))
+
+    def is_correct(self, answer_text: str, gold_text: str) -> bool:
+        return self.score(answer_text, gold_text) >= self.threshold
+
+# =========================
+# GPTCache setup helpers
+# =========================
+def _make_embedder(name: str, sbert_model: str) -> object:
     """
-    def __init__(self, embedder_name="sentence-transformers/all-MiniLM-L6-v2",
-                 capacity: int = 256, policy: str = "lru",
-                 sim_eval_name: str = "cosine", eval_kwargs: Optional[Dict[str, Any]] = None, vq_bins: int = 20):
-        # Prefer GPU if available (big speedup); otherwise CPU.
+    Create an embedding object compatible with GPTCache (has .to_embeddings and .dimension).
+    - "onnx"  → EmbOnnx()          (small, CPU-friendly)
+    - "sbert" → EmbSBERT(model)    (best quality per watt, local)
+    """
+    name = name.lower()
+    if name == "onnx":
+        return EmbOnnx()
+    elif name == "sbert":
+        return EmbSBERT(sbert_model)
+    else:
+        raise ValueError(f"--embedder must be 'onnx' or 'sbert'; got {name!r}")
+
+def _make_evaluator(
+    sim_eval_name: str,
+    *,
+    sbert_xenc_model: str,
+    onnx_model: str,
+    cohere_model: str,
+    cohere_api_key: Optional[str],
+):
+    """
+    Translate CLI --sim-eval to a GPTCache SimilarityEvaluation object.
+    We also allow 'cosine' as a user-friendly alias that maps to NumpyNormEvaluation(enable_normal=True).
+    """
+    n = sim_eval_name.lower()
+    if n == "exact":
+        return ExactMatchEvaluation()
+    if n == "np":
+        return NumpyNormEvaluation(enable_normal=True)
+    if n == "distance":
+        return SearchDistanceEvaluation()
+    if n == "sbert":
+        return SbertCrossencoderEvaluation(model=sbert_xenc_model)
+    if n == "onnx":
+        return OnnxModelEvaluation(model=onnx_model)
+    if n == "cohere":
+        if not (cohere_api_key or os.getenv("COHERE_API_KEY")):
+            raise ValueError("Cohere evaluator requires --cohere-api-key or COHERE_API_KEY.")
+        return CohereRerankEvaluation(model=cohere_model, api_key=cohere_api_key or os.getenv("COHERE_API_KEY"))
+    if n == "cosine":
+        # Practical cosine-style acceptance using normalized L2 distance
+        return NumpyNormEvaluation(enable_normal=True)
+    raise ValueError(f"Unknown --sim-eval '{sim_eval_name}'. "
+                     f"Choose from cosine|exact|np|distance|sbert|onnx|cohere|krecip")
+
+def _init_gptcache_once(
+    *,
+    threshold: float,
+    capacity: int,
+    policy: str,
+    embedder_name: str,
+    sbert_model: str,
+    sim_eval_name: str,
+    sbert_xenc_model: str,
+    onnx_model: str,
+    cohere_model: str,
+    cohere_api_key: Optional[str],
+    db_path: Optional[str] = None,
+    index_path: Optional[str] = None,
+    top_k: int = 5,
+    krecip_topk: int = 3,
+    krecip_max_distance: float = 4.0,
+    krecip_positive: bool = False,
+    vector_backend: str = "faiss",
+):
+    """
+    (Re)initialize GPTCache with the requested components for a single run configuration.
+
+    - capacity      → DataManager(max_size=capacity)
+    - policy        → eviction policy ("LRU" or "FIFO") supported by GPTCache
+    - threshold     → Config(similarity_threshold=threshold) for accept/reject
+    - embedder_name → "onnx" or "sbert"
+    - sim_eval_name → evaluator for acceptance (e.g., distance/np/exact/sbert/onnx/cohere)
+    """
+    # 1) Embedding backend
+    emb = _make_embedder(embedder_name, sbert_model=sbert_model)
+
+    # Safe wrapper: preserve GPTCache signature and return 1-D float32 for single embedding
+    def _embedding_func(data, extra_param=None, **kwargs):
+        v = emb.to_embeddings(data, extra_param=extra_param)
+        v = np.asarray(v, dtype=np.float32)
+        # Flatten a single-row matrix to 1-D (e.g., (1, 384) -> (384,))
+        if v.ndim == 2 and v.shape[0] == 1:
+            v = v[0]
+        return v
+
+    # Probe through the wrapper to determine actual embedding dimension
+    try:
+        probe = _embedding_func(["hello"])
+        print(f"[gptcache] probe_type={type(probe)}")
         try:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[gptcache] probe_shape={probe.shape}")
         except Exception:
-            device = "cpu"
-
-        self.model = SentenceTransformer(embedder_name, device=device)
-        self.capacity = max(1, int(capacity))
-        self.policy = policy.lower()
-        assert self.policy in {"lru", "lfu", "fifo"}, "policy must be 'lru' or 'lfu' or 'fifo'"
-
-        # evaluator setup
-        eval_kwargs = eval_kwargs or {}
-        self.sim_eval_name = sim_eval_name.lower()
-        self.sim_eval, self.eval_range = _build_gptcache_evaluator(self.sim_eval_name, **eval_kwargs)
-
-        # storage
-        self.vecs: List[np.ndarray] = []
-        self.texts: List[str] = []                # store original prompt
-        self.payloads: List[Tuple[str, str]] = []   # (intent, answer)
-        self.freq: List[int] = []
-        self.last_access: List[int] = []
-        self.created_at: List[int] = []
-        # VectorQ per-entry stats
-        self.vq_bins = int(vq_bins)
-        self.vq: List[VQStats] = []
-        self._clock = 0  # monotonically increasing "tick" for recency
-
-    # ---- internal helpers ----
-    def _tick(self) -> int:
-        self._clock += 1
-        return self._clock
-
-    def _evict_index(self) -> int:
-        """Return the index to evict based on policy."""
-        if self.policy == "lru":
-            # Evict oldest last_access
-            return int(np.argmin(self.last_access))
-        elif self.policy == "lfu":
-            # LFU: min frequency; break ties by oldest last_access
-            min_freq = min(self.freq)
-            candidates = [i for i, f in enumerate(self.freq) if f == min_freq]
-            if len(candidates) == 1:
-                return candidates[0]
-            # tie-break by LRU among the least-frequent
-            la = np.array([self.last_access[i] for i in candidates])
-            return candidates[int(np.argmin(la))]
-        elif self.policy == "fifo":
-            # Oldest creation time → evict first
-            return int(np.argmin(self.created_at))
-        else:
-            raise ValueError(f"unknown policy: {self.policy}")
-
-    def _replace_at(self, idx: int, v: np.ndarray, intent: str, answer: str, text: str) -> None:
-        self.vecs[idx] = v
-        self.texts[idx] = text
-        self.payloads[idx] = (intent, answer)
-        self.freq[idx] = 1
-        now = self._tick()
-        self.last_access[idx] = now
-        self.created_at[idx] = now
-
-    # ---- public API ----
-    def embed(self, text: str) -> np.ndarray:
-        return self.model.encode(
-            [text],
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )[0]
-
-    def query(self, q: str, threshold: float, vq_mode: str = "off", vq_target: float = 0.9, vq_min_count: int = 5, vq_sample: float = 0.3, rng: Optional[random.Random] = None) -> Tuple[bool, str, str, int, float]:
-        """
-        Return (is_hit, predicted_intent, answer). On hit, update recency/frequency.
-        """
-        if not self.vecs:
-            return False, "", "", -1, 0.0
-        now = self._tick()
-        # Fast-path: cosine similarity using embeddings
-        if self.sim_eval_name == "cosine":
-            qv = self.embed(q).reshape(1, -1)
-            sims = cosine_similarity(qv, np.vstack(self.vecs))[0]  # (N,)
-            j = int(np.argmax(sims))
-            # Normalize cosine from [-1,1] to [0,1] for consistent thresholds
-            s = float(sims[j])
-            s01 = (s + 1.0) / 2.0
-            # VectorQ gating if enabled
-            if vq_mode == "per-entry":
-                rng = rng or random.Random()
-                verdict = self.vq[j].confident(s01, min_count=vq_min_count, target=vq_target)
-                if verdict is True:
-                    self.last_access[j] = now
-                    self.freq[j] += 1
-                    intent, ans = self.payloads[j]
-                    return True, intent, ans, j, s01
-                elif verdict is None:
-                    # probe with probability, else fall back to static threshold
-                    if rng.random() < float(vq_sample):
-                        return False, "", "", j, s01
-                    # static threshold fallback
-                    if s01 >= threshold:
-                        self.last_access[j] = now
-                        self.freq[j] += 1
-                        intent, ans = self.payloads[j]
-                        return True, intent, ans, j, s01
-                    return False, "", "", j, s01
-                else:
-                    # verdict is False → MISS
-                    return False, "", "", j, s01
-            # Static threshold path
-            if s01 >= threshold:
-                self.last_access[j] = now
-                self.freq[j] += 1
-                intent, ans = self.payloads[j]
-                return True, intent, ans, j, s01
-            return False, "", "", j, s01
-
-        # GPTCache evaluator path: compute normalized [0,1] score
-        best_idx = -1
-        best_score = -1.0
-
-        qv = None
-        if self.sim_eval_name in ("np", "distance"):
-            qv = self.embed(q).reshape(-1)
-
-        rmin, rmax = self.eval_range
-
-        for i in range(len(self.vecs)):
-            if self.sim_eval_name == "exact":
-                src = {"question": q}
-                cand = {"question": self.texts[i]}
-            elif self.sim_eval_name == "sbert":
-                src = {"question": q}
-                cand = {"question": self.texts[i]}
-            elif self.sim_eval_name == "onnx":
-                src = {"question": q}
-                cand = {"question": self.texts[i]}
-            elif self.sim_eval_name == "cohere":
-                src = {"question": q}
-                cand = {"answer": self.payloads[i][1]}
-            elif self.sim_eval_name == "np":
-                src = {"question": q, "embedding": qv}
-                cand = {"question": self.texts[i], "embedding": self.vecs[i]}
-            elif self.sim_eval_name == "distance":
-                if qv is None:
-                    qv = self.embed(q).reshape(1, -1)
-                sim = float(cosine_similarity(qv.reshape(1, -1), self.vecs[i].reshape(1, -1))[0, 0])
-                dist = 1.0 - sim
-                src = {}
-                cand = {"search_result": (dist, None)}
+            pass
+        if isinstance(probe, np.ndarray):
+            if probe.ndim == 1:
+                emb_dim = int(probe.shape[0])
+            elif probe.ndim == 2:
+                emb_dim = int(probe.shape[1])
             else:
-                raise RuntimeError(f"Unhandled sim-eval: {self.sim_eval_name}")
-
-            score = float(self.sim_eval.evaluation(src, cand))
-            score01 = _normalize_score(score, rmin, rmax)
-            if score01 > best_score:
-                best_score = score01
-                best_idx = i
-
-        if best_idx < 0:
-            return False, "", "", -1, 0.0
-        s = float(best_score)
-        # VectorQ gating if enabled
-        if vq_mode == "per-entry":
-            rng = rng or random.Random()
-            verdict = self.vq[best_idx].confident(s, min_count=vq_min_count, target=vq_target)
-            if verdict is True:
-                self.last_access[best_idx] = now
-                self.freq[best_idx] += 1
-                intent, ans = self.payloads[best_idx]
-                return True, intent, ans, best_idx, s
-            elif verdict is None:
-                if rng.random() < float(vq_sample):
-                    return False, "", "", best_idx, s
-                if s >= threshold:
-                    self.last_access[best_idx] = now
-                    self.freq[best_idx] += 1
-                    intent, ans = self.payloads[best_idx]
-                    return True, intent, ans, best_idx, s
-                return False, "", "", best_idx, s
-            else:
-                return False, "", "", best_idx, s
-        # Static threshold path
-        if s >= threshold:
-            self.last_access[best_idx] = now
-            self.freq[best_idx] += 1
-            intent, ans = self.payloads[best_idx]
-            return True, intent, ans, best_idx, s
-        return False, "", "", best_idx, s
-
-    def update_vq(self, matched_index: int, score01: float, was_correct: bool) -> None:
-        if 0 <= matched_index < len(self.vq):
-            self.vq[matched_index].update(score01, int(was_correct))
-
-    def insert(self, text: str, intent: str, answer: str) -> None:
-        """
-        Insert (text -> embedding) with its payload. If capacity is full, evict one.
-        New entries start with freq=1 and recency=now.
-        """
-        v = self.embed(text)
-        now = self._tick()
-        if len(self.vecs) < self.capacity:
-            self.vecs.append(v)
-            self.texts.append(text)
-            self.payloads.append((intent, answer))
-            self.freq.append(1)
-            self.last_access.append(now)
-            self.created_at.append(now)
-            self.vq.append(VQStats(bins=self.vq_bins))
+                emb_dim = int(probe.shape[-1])
         else:
-            idx = self._evict_index()
-            self._replace_at(idx, v, intent, answer, text)
-            # reset VQ stats on replacement
-            if 0 <= idx < len(self.vq):
-                self.vq[idx] = VQStats(bins=self.vq_bins)
+            try:
+                emb_dim = int(len(probe[0]))
+            except Exception:
+                emb_dim = int(len(probe))
+    except Exception as e:
+        print("[gptcache] embedding failed:", e)
+        emb_dim = getattr(emb, 'dimension', None) or 0
+    print(f"[gptcache] embedder={embedder_name} model={sbert_model} dim={emb_dim}")
+
+    # 2) DataManager = [scalar store: sqlite] + [vector store: faiss]
+    # Ensure parent folders exist for provided paths (Windows-safe)
+    def _ensure_parent(path_str: Optional[str]) -> None:
+        if path_str:
+            parent_dir = os.path.abspath(os.path.dirname(path_str))
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+    _ensure_parent(db_path)
+    _ensure_parent(index_path)
+
+    # Build DataManager via manager_factory with top_k support
+    backend = (vector_backend or "faiss").lower()
+    vector_params = {"dimension": emb_dim, "top_k": int(top_k)}
+    if backend == "faiss" and index_path:
+        vector_params["index_path"] = index_path
+    scalar_params = {"sql_url": db_path} if db_path else None
+    print(f"[gptcache] vector_params={vector_params} db_path={db_path} index_path={index_path}")
+    try:
+        data_manager = manager_factory(
+            f"sqlite,{backend}",
+            vector_params=vector_params,
+            scalar_params=scalar_params,
+            eviction_params={"max_size": int(capacity), "policy": policy.upper()},
+        )
+    except Exception:
+        data_manager = manager_factory(
+            f"sqlite,{backend}",
+            vector_params=vector_params,
+            scalar_params=scalar_params,
+            eviction_params={"maxsize": int(capacity), "policy": policy.upper()},
+        )
+    try:
+        print(
+            "[gptcache] stores:",
+            "vector_base=", type(data_manager.vector_base).__name__,
+            "scalar_base=", type(data_manager.scalar_base).__name__,
+        )
+    except Exception:
+        pass
+
+    # 3) Similarity evaluator (special-case K-Reciprocal which needs the vector DB)
+    if sim_eval_name.lower() == "krecip":
+        vectordb = data_manager.vector_base
+        evaluator = KReciprocalEvaluation(
+            vectordb=vectordb,
+            top_k=int(krecip_topk),
+            max_distance=float(krecip_max_distance),
+            positive=bool(krecip_positive),
+        )
+    else:
+        evaluator = _make_evaluator(
+            sim_eval_name,
+            sbert_xenc_model=sbert_xenc_model,
+            onnx_model=onnx_model,
+            cohere_model=cohere_model,
+            cohere_api_key=cohere_api_key,
+        )
+
+    # Optional scale hint for distance-based evaluator
+    if sim_eval_name.lower() in ("distance",):
+        print("Note: distance-based evaluator typically treats LOWER values as more similar; tune τ accordingly.")
+
+    # 4) Global similarity threshold
+    cfg = Config(similarity_threshold=float(threshold))
+
+    # 5) Initialize GPTCache
+    #    pre_embedding_func=last_content extracts the last chat message content
+    cache.init(
+        embedding_func=_embedding_func,
+        data_manager=data_manager,
+        similarity_evaluation=evaluator,
+        pre_embedding_func=last_content,
+        config=cfg,
+    )
+
+    # Probe a save path via adapter to surface storage errors early
+    try:
+        _ = cached_openai.ChatCompletion.create(
+            model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+            messages=[{"role": "user", "content": "__probe__"}],
+            max_tokens=8,
+            temperature=0.0,
+            timeout=30,
+        )
+        print("[gptcache] probe save passed (adapter path)")
+    except Exception as e:
+        print("[gptcache] probe save failed:", e)
 
 
-# ----------------------------
-# Experiment loop
-# ----------------------------
+# =========================
+# Experiment loop (GPTCache)
+# =========================
 def run_eval(
-    split: str = "train",
-    limit: int = 200,
-    thresholds: List[float] = [0.65, 0.75, 0.85],
-    embedder: str = "sentence-transformers/all-MiniLM-L6-v2",
-    llm_latency_s: float = 0.05,
-    capacity: int = 256,
-    policies: List[str] = ("lru", "lfu"),
-    provider_name: str = "sim",
-    rpm: float = 12.0,
-    km_intents: int = 0,
-    km_per_intent: int = 0,
-    sim_eval_name: str = "cosine",
-    eval_kwargs: Optional[Dict[str, Any]] = None,
-    vq_mode: str = "off",
-    vq_target: float = 0.9,
-    vq_bins: int = 20,
-    vq_min_count: int = 5,
-    vq_sample: float = 0.3,
-    seed: int = 42,
-) -> None:
+    *,
+    split: str,
+    limit: int,
+    thresholds: List[float],
+    embedder_name: str,
+    sbert_model: str,
+    capacity: int,
+    policies: List[str],
+    provider: str,
+    rpm: float,
+    km_intents: int,
+    km_per_intent: int,
+    sim_eval_name: str,
+    sbert_xenc_model: str,
+    onnx_model: str,
+    cohere_model: str,
+    cohere_api_key: Optional[str],
+    seed: int,
+    answer_judge: str,
+    answer_threshold: float,
+    answer_model: str,
+    db_path: Optional[str],
+    index_path: Optional[str],
+    topk: int,
+    out_dir: str,
+    krecip_topk: int,
+    krecip_max_distance: float,
+    krecip_positive: bool,
+    vector_backend: str,
+):
     """
-    Execute the cache simulation over a BANKING77 split.
-
-    Metrics:
-      - Precision: correct_hits / hits
-      - Recall:    hits / should_hit
-      - Timing:    avg LLM time (simulated) vs avg cache time
+    Execute evaluation with GPTCache as the cache backend.
     """
+    # --- Choose data stream (plain or K×M to force repeats) ---
     if km_intents and km_per_intent:
-        data = load_banking77_k_per_intent(
+        stream = load_banking77_k_per_intent(
             split=split, num_intents=km_intents, per_intent=km_per_intent, seed=seed
         )
     else:
-        data = load_banking77(split=split, limit=limit, seed=seed)
-        all_intents = sorted({ex.intent for ex in data})
-        canonical = build_canonical_answers(all_intents)
+        stream = load_banking77(split=split, limit=limit, seed=seed)
 
-    # Build provider once
-    llm = get_provider(provider=provider_name, temperature=0.0, sleep_s=llm_latency_s)
+    total = len(stream)
+
+    # Build canonical answers and optional correctness judge
+    all_intents = sorted({ex.intent for ex in stream})
+    canonical = build_canonical_answers(all_intents)
+    judge = AnswerJudge(model_name=answer_model, threshold_cos=answer_threshold) if answer_judge == "sbert" else None
+
+    # Seeding for reproducibility
+    try:
+        import torch  # type: ignore
+    except Exception:
+        torch = None
+    random.seed(seed)
+    np.random.seed(seed)
+    if torch is not None:
+        try:
+            torch.manual_seed(seed)
+        except Exception:
+            pass
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
+    # --- Configure OpenAI-compatible client for Ollama (or keep OPENAI defaults) ---
+    # Your partner's snippet: point OpenAI SDK to Ollama and dummy key "ollama".
+    import openai as openai_sdk
+    if provider == "ollama":
+        openai_sdk.api_base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1")
+        openai_sdk.api_key = os.getenv("OLLAMA_API_KEY", "ollama")
+    elif provider == "openai":
+        openai_sdk.api_base = os.getenv("OPENAI_API_BASE", openai_sdk.api_base)
+        openai_sdk.api_key = os.getenv("OPENAI_API_KEY", openai_sdk.api_key)
+    # else: leave defaults as-is
+
+    # Simple RPM limiter (applied on misses only; safer for free tiers without slowing hits)
+    interval = 60.0 / max(1.0, float(rpm))
+    last_call = 0.0
+    def _rate_limit():
+        nonlocal last_call
+        now = time.time()
+        delta = now - last_call
+        if delta < interval:
+            time.sleep(interval - delta)
+        last_call = time.time()
+
+    # Warn if distance thresholds look off-scale
+    if sim_eval_name.lower() == "distance" and any(float(t) > 1.0 for t in thresholds):
+        print("WARN: --sim-eval distance with thresholds > 1.0 may be on the wrong scale.")
+
+    # Ensure output directory for CSV exists and create run id
+    out_dir = out_dir or "experiments/outputs"
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception:
+        pass
+    run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+    csv_path = os.path.join(out_dir, f"eval_cache_bank77_hf_{run_id}.csv")
+    try:
+        with open(os.path.join(out_dir, f"args_{run_id}.txt"), "w", encoding="utf-8") as f:
+            f.write(" ".join(sys.argv))
+    except Exception:
+        pass
 
     for policy in policies:
-        policy = policy.lower()
-        assert policy in {"lru", "lfu", "fifo"}, "policy must be 'lru' or 'lfu' or 'fifo'"
-        rng = random.Random(seed)
+        p = policy.lower()
+        if p not in {"lru", "fifo"}:
+            raise ValueError(f"GPTCache supports only LRU/FIFO eviction; got '{policy}'.")
+
         for th in thresholds:
-            cache = EvictingVectorCache(
-                embedder_name=embedder,
+            # Fresh cache per (policy, threshold) combo
+            _init_gptcache_once(
+                threshold=th,
                 capacity=capacity,
-                policy=policy,
+                policy=p,
+                embedder_name=embedder_name,
+                sbert_model=sbert_model,
                 sim_eval_name=sim_eval_name,
-                eval_kwargs=eval_kwargs,
-                vq_bins=vq_bins,
+                sbert_xenc_model=sbert_xenc_model,
+                onnx_model=onnx_model,
+                cohere_model=cohere_model,
+                cohere_api_key=cohere_api_key,
+                db_path=db_path,
+                index_path=index_path,
+                top_k=topk,
+                krecip_topk=krecip_topk,
+                krecip_max_distance=krecip_max_distance,
+                krecip_positive=krecip_positive,
+                vector_backend=vector_backend,
             )
 
-            total = len(data)
-            should_hit = 0        # #queries whose intent has been seen before (ground-truth)
-            hits = 0              # #queries served from cache (true+false)
-            correct_hits = 0      # #hits whose intent matches gold
-            llm_time = 0.0
-            llm_calls = 0
-            cache_time = 0.0
-            seen_truth = set()
-            rl = RateLimiter(rpm)
+            # Post-init ping for Ollama connectivity (routes through GPTCache adapter)
+            if provider == "ollama":
+                try:
+                    _ = cached_openai.ChatCompletion.create(
+                        model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+                        messages=[{"role": "user", "content": "ping"}],
+                    )
+                except NotInitError:
+                    print("Init error: call cache.init() before using gptcache.adapter.openai.")
+                    raise
+                except Exception as e:
+                    print(f"ERROR: Ollama not reachable or model not pulled. Detail: {e}")
+                    raise
 
-            for ex in data:
-                # 1) Count should-hit strictly by ground-truth history (not cache ops)
-                if ex.intent in seen_truth:
+            should_hit = 0
+            hits = 0
+            false_hit_lower_bound = 0
+            llm_time_sum = 0.0
+            llm_calls = 0
+            cache_time_sum = 0.0
+
+            # Correctness counters
+            correct_total = 0
+            correct_on_hits = 0
+            correct_on_miss = 0
+            n_hits_seen = 0
+            n_miss_seen = 0
+
+            seen_intents = set()
+
+            # For percentile metrics
+            cache_times: List[float] = []
+            miss_times: List[float] = []
+
+            for ex in stream:
+                if ex.intent in seen_intents:
                     should_hit += 1
 
-                # 2) Query the cache
                 t0 = time.time()
-                is_hit, pred_intent, _, j, score01 = cache.query(
-                    ex.text, threshold=th,
-                    vq_mode=vq_mode, vq_target=vq_target,
-                    vq_min_count=vq_min_count, vq_sample=vq_sample,
-                    rng=rng,
-                )
-                cache_time += time.time() - t0
+                try:
+                    resp = cached_openai.ChatCompletion.create(
+                        model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+                        messages=[{"role": "user", "content": ex.text}],
+                        max_tokens=64,
+                        temperature=0.0,
+                        timeout=120,
+                    )
+                except Exception:
+                    print("[gptcache] LLM/adapter exception:\n", "".join(traceback.format_exc()))
+                    raise
+                elapsed = time.time() - t0
 
-                if is_hit and pred_intent == ex.intent:
-                    # True hit
+                meta = resp.get("gptcache_meta", {}) or {}
+                hit = bool(meta.get("hit", False))
+                llm_time = float(meta.get("llm_time_s", 0.0))  # >0 when MISS (LLM called)
+                total_time = float(meta.get("total_time_s", elapsed))
+
+                # Miss-only rate limit to approximate provider quotas without slowing hits
+                if not hit:
+                    _rate_limit()
+
+                # Extract answer text for correctness judging
+                try:
+                    answer_text = resp["choices"][0]["message"]["content"]
+                except Exception:
+                    answer_text = ""
+                if not hit and not answer_text.strip():
+                    print("WARN: MISS returned empty answer (provider likely failed). Check Ollama and model status.")
+
+                # Track timing: count calls on misses; fallback when llm_time missing
+                if not hit:
+                    if llm_time > 0:
+                        llm_calls += 1
+                        llm_time_sum += llm_time
+                        miss_times.append(llm_time)
+                    else:
+                        llm_calls += 1
+                        fallback_time = max(0.0, elapsed)
+                        llm_time_sum += fallback_time
+                        miss_times.append(fallback_time)
+                # Approximate cache lookup time
+                cache_lookup_time = max(0.0, total_time - llm_time)
+                cache_time_sum += cache_lookup_time
+                cache_times.append(cache_lookup_time)
+
+                if hit:
                     hits += 1
-                    correct_hits += 1
-                    if j >= 0:
-                        cache.update_vq(j, score01, True)
-                elif is_hit and pred_intent != ex.intent:
-                    # False hit: count it, but treat as miss for update so cache learns
-                    hits += 1
-                    if provider_name in ("gemini", "hf"):
-                        rl.wait()
-                    ans_text, dt = llm.chat(ex.text)
-                    llm_time += dt
-                    llm_calls += 1
-                    if j >= 0:
-                        cache.update_vq(j, score01, False)
-                    cache.insert(ex.text, ex.intent, ans_text)
+                    n_hits_seen += 1
+                    # Lower bound: if we hit *before* this intent has ever appeared,
+                    # the match must be cross-intent → count as false-hit LB.
+                    if ex.intent not in seen_intents:
+                        false_hit_lower_bound += 1
                 else:
-                    # Miss
-                    if provider_name in ("gemini", "hf"):
-                        rl.wait()
-                    # teach VectorQ about the candidate you almost accepted
-                    if j >= 0:
-                        was_correct = (cache.payloads[j][0] == ex.intent)
-                        cache.update_vq(j, score01, was_correct)
-                    ans_text, dt = llm.chat(ex.text)
-                    llm_time += dt
-                    llm_calls += 1
-                    cache.insert(ex.text, ex.intent, ans_text)
+                    n_miss_seen += 1
 
-                # 3) Mark this intent as seen in the ground-truth sense
-                seen_truth.add(ex.intent)
+                # Correctness bookkeeping
+                if judge is not None:
+                    gold = canonical.get(ex.intent, "")
+                    ok = judge.is_correct(answer_text, gold) if gold else False
+                    if ok:
+                        correct_total += 1
+                        if hit:
+                            correct_on_hits += 1
+                        else:
+                            correct_on_miss += 1
 
-            precision = (correct_hits / hits) if hits else 0.0
+                # Ground-truth "intent has been seen" (independent of cache)
+                seen_intents.add(ex.intent)
+
+            # ---- Summaries ----
             hit_recall = (hits / should_hit) if should_hit else 0.0
-            correct_recall = (correct_hits / should_hit) if should_hit else 0.0
-            false_hit_rate = ((hits - correct_hits) / should_hit) if should_hit else 0.0
-            avg_llm = (llm_time / max(1, llm_calls))
-            avg_cache = (cache_time / total)
+            hit_rate = (hits / total) if total else 0.0
+            avg_llm_time = (llm_time_sum / max(1, llm_calls))
+            avg_cache_time = (cache_time_sum / max(1, total))
 
-            print("\n" + "-" * 66)
-            mode_str = (
-                f"VECTORQ(target={vq_target:.2f})" if vq_mode == "per-entry" else "STATIC"
-            )
-            print(f"POLICY={policy.upper()} | THRESHOLD={th:.2f} | CAPACITY={capacity} | SIM_EVAL={sim_eval_name.upper()} | MODE={mode_str}")
-            print(f"SPLIT={split} | N={total} | LIMIT={limit}")
-            print(f"Should-Hit={should_hit} | Hits={hits} | Correct-Hits={correct_hits}")
-            print(
-                f"Precision={precision:.3f} | Hit-Recall={hit_recall:.3f} | "
-                f"Correct-Recall={correct_recall:.3f} | False-Hit-Rate={false_hit_rate:.3f}"
-            )
-            hit_rate = hits / total if total else 0.0
-            print(f"Hit-Rate={hit_rate:.3f} | LLM calls={llm_calls} | Avg LLM time={avg_llm:.3f}s | Avg cache time={avg_cache:.4f}s")
-            print("-" * 66)
+            print("\n" + "-" * 68)
+            print(f"POLICY={p.upper()} | THRESHOLD={th:.2f} | CAPACITY={capacity} | SIM_EVAL={sim_eval_name.upper()}")
+            km_str = f"| KM={km_intents}x{km_per_intent}" if (km_intents and km_per_intent) else ""
+            print(f"SPLIT={split} | N={total} | LIMIT={limit} {km_str}")
+            print(f"Should-Hit={should_hit} | Hits={hits} | LBound False-Hit={false_hit_lower_bound}")
+            print(f"Hit-Recall={hit_recall:.3f} | Hit-Rate={hit_rate:.3f}")
+            print(f"LLM calls={llm_calls} | Avg LLM time={avg_llm_time:.3f}s | Avg cache time={avg_cache_time:.4f}s")
+            if judge is not None:
+                overall_acc = (correct_total / total) if total else 0.0
+                acc_hits = (correct_on_hits / n_hits_seen) if n_hits_seen else 0.0
+                acc_miss = (correct_on_miss / n_miss_seen) if n_miss_seen else 0.0
+                print(f"Answer-Acc (overall)={overall_acc:.3f} | on HITs={acc_hits:.3f} | on MISSES={acc_miss:.3f}")
+            print("-" * 68)
+
+            # ---- CSV output per (policy, threshold) ----
+            hit_precision = ((hits - false_hit_lower_bound) / hits) if hits else 0.0
+            hit_precision = max(0.0, min(1.0, hit_precision))
+            p95_cache_ms = float(np.percentile(cache_times, 95) * 1000.0) if cache_times else 0.0
+            p95_miss_ms = float(np.percentile(miss_times, 95) * 1000.0) if miss_times else 0.0
+
+            header = [
+                "run_id",
+                "embedder",
+                "sbert_model",
+                "split",
+                "limit",
+                "policy",
+                "sim_eval",
+                "topk",
+                "tau",
+                "should_hit",
+                "hits",
+                "false_hit_lb",
+                "hit_recall",
+                "hit_rate",
+                "hit_precision_lb",
+                "p95_cache_ms",
+                "p95_miss_ms",
+                "llm_calls",
+                "avg_llm_time_s",
+                "avg_cache_time_s",
+            ]
+            row = [
+                run_id,
+                embedder_name,
+                sbert_model,
+                split,
+                int(limit),
+                p.upper(),
+                sim_eval_name,
+                int(topk),
+                float(th),
+                int(should_hit),
+                int(hits),
+                int(false_hit_lower_bound),
+                float(hit_recall),
+                float(hit_rate),
+                float(hit_precision),
+                float(p95_cache_ms),
+                float(p95_miss_ms),
+                int(llm_calls),
+                float(avg_llm_time),
+                float(avg_cache_time),
+            ]
+            write_header = True
+            if os.path.exists(csv_path):
+                try:
+                    write_header = os.path.getsize(csv_path) == 0
+                except Exception:
+                    write_header = False
+            with open(csv_path, mode="a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(header)
+                writer.writerow(row)
+
+            # Flush to avoid file descriptor buildup between sweeps
+            cache.flush()
 
 
-# ----------------------------
+# =========================
 # CLI
-# ----------------------------
+# =========================
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate cache behavior on BANKING77 via 🤗 Datasets, with LRU/LFU policies.")
-    p.add_argument("--split", type=str, default="train", choices=["train", "test"],
-                   help="Dataset split to evaluate.")
-    p.add_argument("--limit", type=int, default=200,
-                   help="Randomly subsample this many examples (0 = use full split).")
-    p.add_argument("--thresholds", type=float, nargs="+", default=[0.65, 0.75, 0.85],
-                   help="One or more cosine similarity thresholds to sweep.")
-    p.add_argument("--embedder", type=str, default="sentence-transformers/all-MiniLM-L6-v2",
-                   help="Sentence-Transformers model name for embeddings.")
-    p.add_argument("--llm-latency-s", type=float, default=0.05,
-                   help="Simulated LLM latency (seconds) for misses).")
-    p.add_argument("--capacity", type=int, default=256,
-                   help="Cache capacity (number of entries).")
-    p.add_argument("--policies", type=str, nargs="+", default=["lru", "lfu"],
-                   help="Eviction policies to evaluate, e.g., lru lfu fifo")
-    p.add_argument("--provider", type=str, default="sim", choices=["sim", "gemini", "hf", "ollama"],
-                   help="Which backend to use for MISSes: sim|gemini|hf|ollama")
-    p.add_argument("--rpm", type=float, default=12.0,
-                   help="Max requests per minute to the provider (Gemini free tier is ~15).")
+    p = argparse.ArgumentParser(description="Evaluate GPTCache on BANKING77 (LRU/FIFO, threshold sweeps).")
+    p.add_argument("--split", type=str, default="train", choices=["train", "test"])
+    p.add_argument("--limit", type=int, default=200, help="Subsample size (0 = full split).")
+    p.add_argument("--thresholds", type=float, nargs="+", default=[],
+                   help="Similarity thresholds. If omitted, sensible defaults per evaluator are used.")
+    p.add_argument("--embedder", type=str, default="sbert", choices=["onnx", "sbert"],
+                   help="Embedding backend for GPTCache vectors.")
+    p.add_argument("--sbert-model", type=str, default="all-MiniLM-L6-v2",
+                   help="Sentence-Transformers model (when --embedder sbert).")
+    p.add_argument("--capacity", type=int, default=256, help="Max cache entries (DataManager.max_size).")
+    p.add_argument("--policies", type=str, nargs="+", default=["lru", "fifo"],
+                   help="Eviction strategies to compare (GPTCache supports LRU, FIFO).")
+    p.add_argument("--provider", type=str, default="ollama", choices=["ollama", "openai"],
+                   help="LLM provider behind the adapter (OpenAI-compatible).")
+    p.add_argument("--rpm", type=float, default=12.0, help="Coarse per-process rate limit (calls/min).")
     p.add_argument("--sim-eval", type=str, default="cosine",
-                   choices=["cosine", "exact", "np", "distance", "sbert", "onnx", "cohere"],
-                   help="Similarity evaluator to use for hit decision.")
-    p.add_argument("--sbert-model", type=str, default="cross-encoder/quora-distilroberta-base",
-                   help="Model for --sim-eval sbert")
+                   choices=["cosine", "exact", "np", "distance", "sbert", "onnx", "cohere", "krecip"],
+                   help="Hit decision evaluator (normalized to [0,1] threshold in GPTCache).")
+    p.add_argument("--topk", type=int, default=5, help="Top K for FAISS vector search.")
+    p.add_argument("--sbert-xenc-model", type=str, default="cross-encoder/quora-distilroberta-base",
+                   help="Cross-encoder for --sim-eval sbert.")
     p.add_argument("--onnx-model", type=str, default="GPTCache/albert-duplicate-onnx",
-                   help="Model for --sim-eval onnx")
+                   help="Model for --sim-eval onnx.")
     p.add_argument("--cohere-model", type=str, default="rerank-english-v2.0",
-                   help="Model for --sim-eval cohere")
-    p.add_argument("--cohere-api-key", type=str, default=None,
-                   help="API key for Cohere (or set COHERE_API_KEY)")
-    p.add_argument("--distance-max", type=float, default=2.0,
-                   help="max_distance for --sim-eval distance (cosine distance in [0,2])")
-    p.add_argument("--distance-positive", action="store_true",
-                   help="If set for --sim-eval distance, larger distance = more similar (usually False).")
-    p.add_argument("--vq-mode", type=str, default="off", choices=["off", "per-entry"],
-                   help="Adaptive acceptance policy (VectorQ): 'off' or 'per-entry'.")
-    p.add_argument("--vq-target", type=float, default=0.9,
-                   help="Target acceptance precision for VectorQ (acts like threshold on estimated correctness).")
-    p.add_argument("--vq-bins", type=int, default=20,
-                   help="Histogram bins for VectorQ similarity score in [0,1].")
-    p.add_argument("--vq-min-count", type=int, default=5,
-                   help="Minimum samples per bin to consider confident in VectorQ.")
-    p.add_argument("--vq-sample", type=float, default=0.3,
-                   help="Probe probability in VectorQ when confidence is unknown.")
-    p.add_argument("--km-intents", type=int, default=0,
-                   help="If >0 with --km-per-intent, switch to K×M loader with this many intents.")
+                   help="Cohere reranker for --sim-eval cohere.")
+    p.add_argument("--cohere-api-key", type=str, default=None, help="Or set COHERE_API_KEY.")
+    p.add_argument("--km-intents", type=int, default=0, help="If >0 with --km-per-intent, use K×M loader.")
     p.add_argument("--km-per-intent", type=int, default=0,
-                   help="If >0 with --km-intents, number of paraphrases per selected intent.")
-    p.add_argument("--seed", type=int, default=42, help="RNG seed for sampling/shuffle.")
+                   help="If >0 with --km-intents, M paraphrases per selected intent.")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--db-path", type=str, default=None,
+                   help="Path to SQLite file for scalar store (avoids default path issues).")
+    p.add_argument("--index-path", type=str, default=None,
+                   help="Path to FAISS index file (ensure dim matches chosen embedder).")
+    p.add_argument("--answer-judge", type=str, default="sbert",
+                   choices=["none", "sbert"],
+                   help="Evaluate answer correctness vs canonical answers.")
+    p.add_argument("--answer-threshold", type=float, default=0.60,
+                   help="Cosine threshold for correctness when using --answer-judge sbert.")
+    p.add_argument("--answer-model", type=str, default="sentence-transformers/all-MiniLM-L6-v2",
+                   help="Sentence-Transformers model for answer judging.")
+    p.add_argument("--out-dir", type=str, default="experiments/outputs", help="Directory to write CSV outputs.")
+    p.add_argument("--krecip-topk", type=int, default=3, help="Top-K neighbors for K-Reciprocal check.")
+    p.add_argument("--krecip-max-distance", type=float, default=4.0, help="Max distance bound for K-Reciprocal.")
+    p.add_argument("--krecip-positive", action="store_true",
+                   help="Set True if the underlying similarity score increases with similarity (rare for distance metrics).")
+    p.add_argument("--vector-backend", type=str, default="faiss", choices=["faiss", "hnswlib"],
+                   help="Vector backend to use for ANN search.")
     return p.parse_args()
-
 
 if __name__ == "__main__":
     args = parse_args()
-    eval_kwargs = {
-        "sbert_model": args.sbert_model,
-        "onnx_model": args.onnx_model,
-        "cohere_model": args.cohere_model,
-        "cohere_api_key": args.cohere_api_key or os.getenv("COHERE_API_KEY"),
-        "distance_max": args.distance_max,
-        "distance_positive": bool(args.distance_positive),
+    # Per-evaluator default thresholds if none provided explicitly
+    DEFAULT_TAU = {
+        "cosine":   [0.6, 0.7, 0.8, 0.9],
+        "np":       [0.6, 0.7, 0.8, 0.9],
+        "sbert":    [0.5, 0.6, 0.7, 0.8],
+        "onnx":     [0.5, 0.6, 0.7, 0.8],
+        "cohere":   [0.4, 0.5, 0.6, 0.7],
+        "distance": [0.1, 0.2, 0.3, 0.4],
+        "krecip":   [0.6, 0.7, 0.8],
     }
+    if not args.thresholds:
+        args.thresholds = DEFAULT_TAU.get(args.sim_eval, args.thresholds)
     run_eval(
         split=args.split,
         limit=args.limit,
         thresholds=args.thresholds,
-        embedder=args.embedder,
-        llm_latency_s=args.llm_latency_s,
+        embedder_name=args.embedder,
+        sbert_model=args.sbert_model,
         capacity=args.capacity,
         policies=args.policies,
-        provider_name=args.provider,
+        provider=args.provider,
         rpm=args.rpm,
         km_intents=args.km_intents,
         km_per_intent=args.km_per_intent,
         sim_eval_name=args.sim_eval,
-        eval_kwargs=eval_kwargs,
-        vq_mode=args.vq_mode,
-        vq_target=args.vq_target,
-        vq_bins=args.vq_bins,
-        vq_min_count=args.vq_min_count,
-        vq_sample=args.vq_sample,
+        sbert_xenc_model=args.sbert_xenc_model,
+        onnx_model=args.onnx_model,
+        cohere_model=args.cohere_model,
+        cohere_api_key=args.cohere_api_key,
         seed=args.seed,
+        answer_judge=args.answer_judge,
+        answer_threshold=args.answer_threshold,
+        answer_model=args.answer_model,
+        db_path=args.db_path,
+        index_path=args.index_path,
+        topk=args.topk,
+        out_dir=args.out_dir,
+        krecip_topk=args.krecip_topk,
+        krecip_max_distance=args.krecip_max_distance,
+        krecip_positive=args.krecip_positive,
+        vector_backend=args.vector_backend,
     )

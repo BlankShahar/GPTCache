@@ -1,0 +1,1 @@
+scripts/eval_cache_bank77_hf.py --split train --limit 160 --km-intents 20 --km-per-intent 4 --embedder sbert --sbert-model sentence-transformers/all-MiniLM-L6-v2 --sim-eval np --thresholds 0.7 --topk 5 --policies lru --provider ollama --rpm 12 --db-path experiments/outputs/cache.sqlite --index-path experiments/outputs/faiss.index --out-dir experiments/outputs

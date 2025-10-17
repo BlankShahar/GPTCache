@@ -1,0 +1,2 @@
+run_id,embedder,sbert_model,split,limit,policy,sim_eval,topk,tau,should_hit,hits,false_hit_lb,hit_recall,hit_rate,hit_precision_lb,p95_cache_ms,p95_miss_ms,llm_calls,avg_llm_time_s,avg_cache_time_s
+20250929T152454,sbert,sentence-transformers/all-MiniLM-L6-v2,train,160,LRU,np,5,0.7,60,0,0,0.0,0.0,0.0,30705.127000808712,30705.127000808712,80,24.77677602469921,24.77677602469921

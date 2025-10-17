@@ -1,0 +1,5 @@
+rows,hit_rate,avg_llm_time_s,avg_total_time_s,first_hit_step,cluster_hit_rate_mean,embedding_model,threshold,policy,max_size,clean_size
+30,1.0,0.0,0.12545738220214844,1,1.0,nomic-embed-text,0.8,LFU,16,4
+30,1.0,0.0,0.13046669165293376,1,1.0,nomic-embed-text,0.85,LFU,16,4
+30,1.0,0.0,0.12994504769643148,1,1.0,nomic-embed-text,0.9,LFU,16,4
+30,1.0,0.0,0.13783729871114095,1,1.0,nomic-embed-text,0.95,LFU,16,4

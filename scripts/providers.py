@@ -177,7 +177,7 @@ class OllamaProvider(LLMProvider):
         self.requests = requests
         self.base_url = (base_url or
                          os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1").rstrip("/"))
-        self.model = model or os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+        self.model = model or os.getenv("OLLAMA_MODEL", "llama3.1:8b")
         self.temperature = float(temperature)
         self.timeout_s = float(os.getenv("OLLAMA_TIMEOUT_S", timeout_s or 120))
 

@@ -308,7 +308,7 @@ def adapt(llm_handler, cache_data_convert, update_cache_callback, *args, **kwarg
                 llm_data, update_cache_func, *args, **kwargs
             )
         except Exception as e:  # pylint: disable=W0703
-            gptcache_log.warning("failed to save the data to cache, error: %s", e)
+            gptcache_log.warning("failed to save the data to cache, error: %s", e, exc_info=True)
 
     return llm_data
 

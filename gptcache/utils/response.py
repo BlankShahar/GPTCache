@@ -3,7 +3,32 @@ import requests
 
 
 def get_message_from_openai_answer(openai_resp):
-    return openai_resp["choices"][0]["message"]["content"], openai_resp['gptcache_meta']['llm_time_s']
+    """
+    Extract assistant message content and llm_time_s in a tolerant way.
+
+    Supports dict-like responses (OpenAI 0.x style) and object-like (1.x).
+    Falls back to llm_time_s=0.0 when meta is missing.
+    """
+    # Dict-like fast path
+    try:
+        content = openai_resp["choices"][0]["message"]["content"]
+        llm_time = 0.0
+        try:
+            meta = openai_resp.get("gptcache_meta", {})
+            if isinstance(meta, dict):
+                llm_time = float(meta.get("llm_time_s", 0.0))
+        except Exception:
+            llm_time = 0.0
+        return content, llm_time
+    except Exception:
+        pass
+
+    # Object-like fallback (OpenAI 1.x)
+    try:
+        content = openai_resp.choices[0].message.content
+    except Exception:
+        content = None
+    return content, 0.0
 
 
 def get_message_from_openai_answer2(openai_resp):
