@@ -226,7 +226,21 @@ def adapt(llm_handler, cache_data_convert, update_cache_callback, *args, **kwarg
                 )
 
             # ---- Add meta to HIT response ----
-            resp = cache_data_convert(return_message)
+            # Compute similarity and distance details to pass along
+            try:
+                factor = max_rank - min_rank
+                _rank_value = cache_whole_data[0]
+                _search_data = cache_whole_data[2]
+                _similarity_score = (_rank_value / factor) if factor else _rank_value
+                _distance_value = (
+                    _search_data[0] if isinstance(_search_data, (list, tuple)) and len(_search_data) > 0 else None
+                )
+                similarity_res = {"score": float(_similarity_score), "distance": float(_distance_value) if _distance_value is not None else None}
+            except Exception:
+                similarity_res = None
+
+            # Pass both the content and the similarity result to the next step
+            resp = cache_data_convert((return_message, similarity_res))
             _total_elapsed = time.time() - start_time
             if isinstance(resp, dict):
                 meta = resp.get("gptcache_meta", {})

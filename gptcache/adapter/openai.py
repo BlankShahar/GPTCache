@@ -177,7 +177,13 @@ class ChatCompletion(openai.ChatCompletion, BaseCacheLLM):
         chat_cache = kwargs.get("cache_obj", cache)
         enable_token_counter = chat_cache.config.enable_token_counter
 
-        def cache_data_convert(cache_data):
+        def cache_data_convert(cache_data_tuple):
+            # Unpack tuple: (cache_data, similarity_res). Backward-compat allows raw cache_data.
+            try:
+                cache_data, similarity_res = cache_data_tuple
+            except Exception:
+                cache_data, similarity_res = cache_data_tuple, None
+
             if enable_token_counter:
                 input_token = _num_tokens_from_messages(kwargs.get("messages"))
                 output_token = token_counter(cache_data)
@@ -186,7 +192,21 @@ class ChatCompletion(openai.ChatCompletion, BaseCacheLLM):
                 saved_token = [0, 0]
             if kwargs.get("stream", False):
                 return _construct_stream_resp_from_cache(cache_data, saved_token)
-            return _construct_resp_from_cache(cache_data, saved_token)
+
+            resp = _construct_resp_from_cache(cache_data, saved_token)
+            # Attach similarity metadata if provided
+            if similarity_res:
+                try:
+                    meta = resp.get("gptcache_meta", {}) or {}
+                    if "similarity" not in meta and "distance" not in meta:
+                        meta.update({
+                            "similarity": similarity_res.get("score", None),
+                            "distance": similarity_res.get("distance", None),
+                        })
+                        resp["gptcache_meta"] = meta
+                except Exception:
+                    pass
+            return resp
 
         kwargs = cls.fill_base_args(**kwargs)
         return adapt(
