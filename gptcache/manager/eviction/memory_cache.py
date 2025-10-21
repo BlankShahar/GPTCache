@@ -1,6 +1,7 @@
 from typing import Any, Callable, List, Tuple
 
 import cachetools
+from adaptive_pipeline import AdaptivePipelineCache
 
 from gptcache.manager.eviction.base import EvictionBase
 
@@ -49,6 +50,8 @@ class MemoryCacheEviction(EvictionBase):
             self._cache = cachetools.FIFOCache(maxsize=maxsize, **kwargs)
         elif self._policy == "RR":
             self._cache = cachetools.RRCache(maxsize=maxsize, **kwargs)
+        elif self._policy in ("AP", "Adaptive-Pipeline", "AdpativePipeline"):
+            self._cache = AdaptivePipelineCache(maxsize=maxsize, **kwargs)
         else:
             raise ValueError(f"Unknown policy {policy}")
 
