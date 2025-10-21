@@ -60,7 +60,7 @@ class MemoryCacheEviction(EvictionBase):
     def put(self, objs: List[Tuple[int, Tuple[float, int]]]):
         for obj in objs:
             if isinstance(obj, tuple):
-                self._cache[obj[0]] = objs[1]  # id to a pair of (latency, length)
+                self._cache[obj[0]] = obj[1]  # id to a pair of (latency, length)
 
     def get(self, obj: Any):
         return self._cache.get(obj)
