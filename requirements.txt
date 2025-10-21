@@ -2,3 +2,4 @@ numpy
 cachetools
 requests
 deprecated
+adaptive-pipeline
