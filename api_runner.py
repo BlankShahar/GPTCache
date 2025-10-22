@@ -16,7 +16,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--policy",
     default="LFU",
-    choices=["LFU", "LRU", "FIFO", "RR", "LRFU", "LRU2"],
+    choices=["LFU", "LRU", "FIFO", "RR", "AP"],
     help="Eviction policy for GPTCache (default: LFU)",
 )
 args = parser.parse_args()
@@ -93,15 +93,18 @@ def run_experiment():
 
     full_ds = concatenate_datasets([train, val])
     sorted_ds = full_ds.sort("created_date")
-    sorted_ds = sorted_ds.select(range(10))  # <-- stays a Dataset (not dict!)
+    # sorted_ds = sorted_ds.select(range(10))
 
     answers = {}  # message_id -> Answer
-
+    i = 0
     for record in tqdm(sorted_ds):
         if record["role"] == "prompter":
             answer = ask(record["text"])
             answers[record["message_id"]] = answer
-        else:  # assistant (LLM)
+            i += 1
+            if i == 20_000:
+                break
+        else:
             parent_id = record["parent_id"]
             if parent_id in answers:
                 answers[parent_id].original_response = record["text"]
