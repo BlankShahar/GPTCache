@@ -30,6 +30,7 @@ import openai
 from gptcache import cache
 from gptcache.adapter import openai as cached_openai
 from gptcache.manager import get_data_manager, CacheBase, VectorBase
+from gptcache.manager.data_manager import DataManager
 from gptcache.similarity_evaluation import (
     SearchDistanceEvaluation,
     ExactMatchEvaluation,
@@ -37,15 +38,19 @@ from gptcache.similarity_evaluation import (
     SbertCrossencoderEvaluation,
     SequenceMatchEvaluation,
 )
-from gptcache.similarity_evaluation.base import SimilarityEvaluation
+from gptcache.similarity_evaluation import SimilarityEvaluation
 from gptcache.config import Config
 # Note: We provide our own chat pre-processor for compatibility across GPTCache versions
 
 # ----------------------------
 # Ollama/OpenAI-compatible setup
 # ----------------------------
-openai.api_base = "http://localhost:11434/v1"
-openai.api_key = "ollama"  # ignored by Ollama; must be non-empty
+# Keep local default but honor per-job server via OPENAI_API_BASE/OLLAMA_HOST
+host = os.getenv("OPENAI_API_BASE") or (
+    "http://" + os.getenv("OLLAMA_HOST", "127.0.0.1:11434") + "/v1"
+)
+openai.api_base = host
+openai.api_key = os.getenv("OPENAI_API_KEY", "ollama")  # non-empty token
 
 EMBED_MODEL = "nomic-embed-text"
 CHAT_MODEL = "llama3.1:8b"
@@ -236,16 +241,26 @@ class RunConfig:
     similarity_threshold: float = 0.8
 
 
-def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_algo: str, vector_metric: str, threshold: float):
+def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_algo: str, vector_metric: str, threshold: float, seed: int):
     """
     Constructs a new, EMPTY GPTCache data manager with a unique filename for the experiment.
+    Uses LOCAL temporary storage for SQLite/FAISS to avoid NFS I/O issues.
     """
-    db_dir = os.path.join("results", "db")
+    # Use job-local temporary directory (not shared filesystem!)
+    if "SLURM_TMPDIR" in os.environ:
+        temp_base = os.environ["SLURM_TMPDIR"]
+    elif "TMPDIR" in os.environ:
+        temp_base = os.environ["TMPDIR"]
+    else:
+        import tempfile
+        temp_base = tempfile.gettempdir()
+
+    db_dir = os.path.join(temp_base, "gptcache_db", f"job_{os.getpid()}")
     os.makedirs(db_dir, exist_ok=True)
 
-    # Create a unique name based on the core algorithm AND the sub-metric.
+    # Create a unique name based on the core algorithm AND the sub-metric AND seed
     algo_name = f"{similarity_algo}-{vector_metric}" if similarity_algo == "search_distance" else similarity_algo
-    file_name_suffix = f"{algo_name}_{threshold}"
+    file_name_suffix = f"{algo_name}_{threshold}_seed{seed}"
 
     db_path = os.path.join(db_dir, f"cache_{file_name_suffix}.db")
     index_path = os.path.join(db_dir, f"faiss_{file_name_suffix}.index")
@@ -255,6 +270,8 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
         os.remove(db_path)
     if os.path.exists(index_path):
         os.remove(index_path)
+
+    print(f"📁 Using local storage for cache database: {db_dir}")
 
     global _INDEX_DIM
     _INDEX_DIM = None
@@ -270,24 +287,65 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
 
     # Only create a vector base if required
     if ("search" in similarity_algo) or ("sbert" in similarity_algo):
-        vector_base = VectorBase("faiss", dimension=_INDEX_DIM, index_path=index_path, metric=vector_metric)
+        import inspect as _inspect
+        vb_kwargs = {"dimension": _INDEX_DIM, "index_path": index_path}
+        try:
+            sig = _inspect.signature(VectorBase.__init__)
+            if "metric" in sig.parameters:
+                vb_kwargs["metric"] = vector_metric
+            elif "metric_type" in sig.parameters:
+                vb_kwargs["metric_type"] = vector_metric
+            else:
+                vb_kwargs["metric_type"] = vector_metric
+        except Exception:
+            vb_kwargs["metric_type"] = vector_metric
+        vector_base = VectorBase("faiss", **vb_kwargs)
     else:
         vector_base = None
 
-    return get_data_manager(
-        CacheBase("sqlite", sql_url=sql_url),
-        vector_base,
-        eviction=eviction,
-        max_size=max_size,
-        clean_size=clean_size,
-    )
+    # Handle custom eviction policies (e.g., Adaptive Pipeline)
+    eviction_upper = eviction.upper() if isinstance(eviction, str) else str(eviction).upper()
+    if eviction_upper in ("AP", "ADAPTIVE-PIPELINE", "ADAPTIVEPIPELINE"):
+        try:
+            from gptcache.manager.eviction.adaptive_memory_cache import AdaptiveMemoryCacheEviction
+        except Exception as import_err:
+            raise RuntimeError(f"Adaptive policy requested but not available: {import_err}")
+
+        eviction_manager = AdaptiveMemoryCacheEviction(
+            policy=eviction,
+            maxsize=max_size,
+            clean_size=clean_size,
+        )
+        return DataManager(
+            CacheBase("sqlite", sql_url=sql_url),
+            vector_base,
+            eviction_manager=eviction_manager,
+        )
+
+    # Built-in eviction policies
+    if vector_base is not None:
+        return get_data_manager(
+            CacheBase("sqlite", sql_url=sql_url),
+            vector_base,
+            eviction=eviction,
+            max_size=max_size,
+            clean_size=clean_size,
+        )
+    else:
+        return DataManager(
+            CacheBase("sqlite", sql_url=sql_url),
+            None,
+            eviction_manager=eviction,
+            max_size=max_size,
+            clean_size=clean_size,
+        )
 
 
-def init_cache_for_policy(cfg: RunConfig, similarity_algo: str, vector_metric: str, threshold: float):
+def init_cache_for_policy(cfg: RunConfig, similarity_algo: str, vector_metric: str, threshold: float, seed: int):
     """
     Initialize GPTCache with a specific eviction policy and similarity evaluator.
     """
-    dm = make_data_manager(cfg.eviction, cfg.max_size, cfg.clean_size, similarity_algo, vector_metric, threshold)
+    dm = make_data_manager(cfg.eviction, cfg.max_size, cfg.clean_size, similarity_algo, vector_metric, threshold, seed)
 
     # Create the similarity evaluation object based on the input string
     if similarity_algo == "search_distance":
@@ -352,7 +410,7 @@ def ask_llm(prompt: str) -> Dict[str, Any]:
     return result
 
 
-def run_once(policy_cfg: RunConfig, model_name: str, similarity_algo: str, vector_metric: str, threshold: float, repeats: int = 1) -> pd.DataFrame:
+def run_once(policy_cfg: RunConfig, model_name: str, similarity_algo: str, vector_metric: str, threshold: float, seed: int, repeats: int = 1) -> pd.DataFrame:
     """
     Run the workload `repeats` times for a given eviction policy, recording per-step metrics.
 
@@ -362,7 +420,7 @@ def run_once(policy_cfg: RunConfig, model_name: str, similarity_algo: str, vecto
         policy, step, cluster, prompt, hit (bool), llm_time_s (float|None), total_time_s (float|None)
         miss_reason (str|None), cache_size (int|None)
     """
-    init_cache_for_policy(policy_cfg, similarity_algo, vector_metric, threshold)
+    init_cache_for_policy(policy_cfg, similarity_algo, vector_metric, threshold, seed)
     # Sanity: exact repeat should hit on the second call
     def _is_cache_hit(resp: Any) -> bool:
         try:
@@ -489,12 +547,20 @@ def main():
     parser.add_argument('--similarity-threshold', type=float, required=True, help='Similarity threshold for cache hits.')
     parser.add_argument('--similarity-algo', type=str, required=True, help='Similarity algorithm to use (search_distance | exact_match | sequence_match | sbert_crossencoder).')
     parser.add_argument('--vector-metric', type=str, default='ip', help='Metric for vector search (ip | l2). Only used with search_distance.')
+    parser.add_argument('--eviction-policy', type=str, default='LFU', help='Eviction policy (LRU | LFU | FIFO | RR | AP).')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--output-dir', type=str, default="results", help='Directory to save experiment results.')
     args = parser.parse_args()
 
     algo_path_name = f"{args.similarity_algo}-{args.vector_metric}" if args.similarity_algo == "search_distance" else args.similarity_algo
-    run_output_dir = os.path.join(args.output_dir, args.embedding_model, algo_path_name, str(args.similarity_threshold), f"seed_{args.seed}")
+    run_output_dir = os.path.join(
+        args.output_dir,
+        args.embedding_model,
+        algo_path_name,
+        str(args.similarity_threshold),
+        f"evict_{args.eviction_policy}",
+        f"seed_{args.seed}"
+    )
     os.makedirs(run_output_dir, exist_ok=True)
 
     global EMBED_MODEL
@@ -502,7 +568,7 @@ def main():
     global _INDEX_DIM
     _INDEX_DIM = None
 
-    policy = "LFU"
+    policy = args.eviction_policy
     max_size, clean_size = 16, 4
 
     cfg = RunConfig(
@@ -518,6 +584,7 @@ def main():
     if args.similarity_algo == "search_distance":
         print(f"  Vector Metric: {args.vector_metric}")
     print(f"  Threshold: {args.similarity_threshold}")
+    print(f"  Eviction Policy: {args.eviction_policy}")
     print(f"  Seed: {args.seed}")
     print(f"======================")
 
@@ -528,6 +595,7 @@ def main():
             similarity_algo=args.similarity_algo,
             vector_metric=args.vector_metric,
             threshold=args.similarity_threshold,
+            seed=args.seed,
             repeats=REPEATS,
         )
 
