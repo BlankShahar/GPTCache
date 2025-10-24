@@ -1,5 +1,3 @@
-# Add eviction policies (can be overridden via CLI)
-EVICTION_POLICIES=("AP" "LRU" "LFU" "FIFO" "RR")
 #!/bin/bash
 # ==============================================================================
 # SLURM Runner — EchoLLM Semantic Cache Experiment (Ensemble-style launcher)
@@ -7,6 +5,7 @@ EVICTION_POLICIES=("AP" "LRU" "LFU" "FIFO" "RR")
 # - Skips configs whose summary.csv already exists
 # - Stages pre-warmed Ollama models onto node-local storage (no WAN pulls)
 # - Starts a per-job Ollama server, sets OPENAI_API_BASE, then runs the job
+# - NEW: Supports custom workload path (OASST dataset or mock)
 # ==============================================================================
 
 set -euo pipefail
@@ -18,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONDA_ENV="gptcache-env"
 
-EMBEDDING_MODELS=("nomic-embed-text" "mxbai-embed-large" "llama3.1:8b")
+EMBEDDING_MODELS=("mxbai-embed-large")
 SEEDS=(42)
 
 # Algorithm-specific configurations (algo:metric:thr1,thr2,...)
@@ -29,6 +28,14 @@ declare -a ALGO_CONFIGS=(
   "sequence_match:none:0.7,0.8,0.9"
   "exact_match:none:1.0"
 )
+
+# Add eviction policies (can be overridden via CLI)
+EVICTION_POLICIES=("LFU")
+
+# NEW: Workload configuration
+# Empty string = use mock workload (default for backward compatibility)
+# Set to path = use OASST workload with ground truth
+WORKLOAD_PATH="workload_oasst.json"  # Use OASST workload
 
 # SLURM Resources (tune for your cluster)
 PARTITION="gpu_partition"
@@ -63,6 +70,10 @@ while [[ $# -gt 0 ]]; do
     --shared-models)          SHARED_OLLAMA_MODELS="$2"; shift 2;;
     --all-models)             IFS=' ' read -r -a ALL_MODELS <<< "$2"; shift 2;;
     --eviction-policies)      IFS=' ' read -r -a EVICTION_POLICIES <<< "$2"; shift 2;;
+    
+    # NEW: Workload path option
+    --workload-path)          WORKLOAD_PATH="$2"; shift 2;;
+    --use-mock)               WORKLOAD_PATH=""; shift 1;;  # Explicit mock mode
 
     # SLURM resources
     --partition)              PARTITION="$2"; shift 2;;
@@ -76,10 +87,13 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [all|status] [options]"
       echo "Options:"
       echo "  --embedding-models 'm1 m2'        (default: ${EMBEDDING_MODELS[*]})"
-      echo "  --thresholds 't1 t2'              (default: ${THRESHOLDS[*]})"
+      echo "  --thresholds 't1 t2'              (default: ${THRESHOLDS[*]:-})"
       echo "  --seeds 's1 s2'                   (default: ${SEEDS[*]})"
       echo "  --algo-configs 'a:m:t1,t2 ...'    (default: predefined)"
       echo "                                     ex: 'search_distance:ip:0.9,0.95 exact_match:none:1.0'"
+      echo "  --eviction-policies 'p1 p2'       (default: ${EVICTION_POLICIES[*]})"
+      echo "  --workload-path PATH              OASST workload JSON (default: mock)"
+      echo "  --use-mock                        Explicitly use mock workload"
       echo "  --conda-env NAME                  (default: $CONDA_ENV)"
       echo "  --output-dir PATH                 (default: $OUTPUT_DIR)"
       echo "  --shared-models PATH              prewarmed models dir (default: $SHARED_OLLAMA_MODELS)"
@@ -89,6 +103,21 @@ while [[ $# -gt 0 ]]; do
       echo "  --cpus N                          (default: $CPUS)"
       echo "  --mem SIZE                        (default: $MEM)"
       echo "  --time D-HH:MM:SS                 (default: $TIME)"
+      echo ""
+      echo "Examples:"
+      echo "  # Use OASST workload with ground truth:"
+      echo "  $0 all --workload-path workload_oasst.json"
+      echo ""
+      echo "  # Use mock workload (default):"
+      echo "  $0 all"
+      echo "  $0 all --use-mock"
+      echo ""
+      echo "  # Test single config with OASST:"
+      echo "  $0 all --embedding-models 'nomic-embed-text' \\
+         --algo-configs 'search_distance:ip:0.95' \\
+         --eviction-policies 'AP LRU' \\
+         --seeds '42' \\
+         --workload-path workload_oasst.json"
       exit 0;;
     *) break;;
   esac
@@ -101,6 +130,17 @@ get_algo_dir() {
     echo "${algo}-${metric}"
   else
     echo "${algo}"
+  fi
+}
+
+# Determine workload name for path structure
+get_workload_name() {
+  if [[ -z "${WORKLOAD_PATH}" ]]; then
+    echo "mock"
+  else
+    # Extract filename without extension (e.g., workload_oasst.json -> oasst)
+    local basename=$(basename "${WORKLOAD_PATH}" .json)
+    echo "${basename#workload_}"  # Remove 'workload_' prefix if present
   fi
 }
 
@@ -119,7 +159,8 @@ fi
 check_output_exists() {
   local embedding_model="$1" algo="$2" metric="$3" threshold="$4" eviction="$5" seed="$6"
   local algo_dir=$(get_algo_dir "$algo" "$metric")
-  local run_dir="${OUTPUT_DIR}/${embedding_model}/${algo_dir}/${threshold}/evict_${eviction}/seed_${seed}"
+  local workload_name=$(get_workload_name)
+  local run_dir="${OUTPUT_DIR}/${workload_name}/${embedding_model}/${algo_dir}/${threshold}/evict_${eviction}/seed_${seed}"
   [[ -s "${run_dir}/summary.csv" ]]
 }
 
@@ -132,9 +173,10 @@ submit_single_job() {
   fi
 
   local algo_dir=$(get_algo_dir "$algo" "$metric")
-  local run_dir="${OUTPUT_DIR}/${embedding_model}/${algo_dir}/${threshold}/evict_${eviction}/seed_${seed}"
-  # Central log directory
-  local log_dir="${OUTPUT_DIR}/logs"
+  local workload_name=$(get_workload_name)
+  local run_dir="${OUTPUT_DIR}/${workload_name}/${embedding_model}/${algo_dir}/${threshold}/evict_${eviction}/seed_${seed}"
+  # Central log directory (per-workload)
+  local log_dir="${OUTPUT_DIR}/${workload_name}/logs"
   mkdir -p "${log_dir}"
   # More descriptive log filename with job details
   local log_file="${log_dir}/${embedding_model}_${algo}_${metric}_thr${threshold}_${eviction}_s${seed}_%j.out"
@@ -152,7 +194,7 @@ submit_single_job() {
     --ntasks=1 \
     --cpus-per-task="${CPUS}" \
     --mem="${MEM}" \
-    --export=ALL,LOG_DIR="${log_dir}",CONDA_ENV="${CONDA_ENV}",PROJECT_ROOT="${PROJECT_ROOT}",PYTHON_SCRIPT="${PYTHON_SCRIPT}",EMBEDDING_MODEL="${embedding_model}",THRESHOLD="${threshold}",SIMILARITY_ALGO="${algo}",VECTOR_METRIC="${metric}",EVICTION_POLICY="${eviction}",SEED="${seed}",OUTPUT_DIR="${OUTPUT_DIR}",SHARED_OLLAMA_MODELS="${SHARED_OLLAMA_MODELS}",ALL_MODELS_STR="${all_models_str}" \
+    --export=ALL,LOG_DIR="${log_dir}",CONDA_ENV="${CONDA_ENV}",PROJECT_ROOT="${PROJECT_ROOT}",PYTHON_SCRIPT="${PYTHON_SCRIPT}",EMBEDDING_MODEL="${embedding_model}",THRESHOLD="${threshold}",SIMILARITY_ALGO="${algo}",VECTOR_METRIC="${metric}",EVICTION_POLICY="${eviction}",SEED="${seed}",OUTPUT_DIR="${OUTPUT_DIR}",WORKLOAD_NAME="${workload_name}",SHARED_OLLAMA_MODELS="${SHARED_OLLAMA_MODELS}",ALL_MODELS_STR="${all_models_str}",WORKLOAD_PATH="${WORKLOAD_PATH}" \
     "${GPU_FLAGS[@]}" << 'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -214,7 +256,7 @@ export OPENAI_API_KEY="ollama"
 
 echo "Starting Ollama server on ${OLLAMA_HOST} …"
 ( ollama serve > "$LOG_DIR/ollama_$SLURM_JOB_ID.log" 2>&1 ) & O_PID=$!
-trap 'echo "Cleaning up Ollama server…"; kill -TERM $O_PID 2>/dev/null || true; echo "Cleaning up temp directory: $JOB_TMPDIR"; rm -rf "$JOB_TMPDIR"' EXIT INT TERM
+trap 'echo "Cleaning up Ollama server…"; kill -TERM $O_PID 2>/dev/null || true' EXIT INT TERM
 
 for i in {1..60}; do
   if curl -sf "http://${OLLAMA_HOST}/api/tags" >/dev/null; then
@@ -247,7 +289,25 @@ echo "  Model: ${EMBEDDING_MODEL}"
 echo "  Threshold: ${THRESHOLD}"
 echo "  Algorithm: ${SIMILARITY_ALGO}"
 echo "  Metric: ${VECTOR_METRIC}"
+echo "  Eviction: ${EVICTION_POLICY}"
 echo "  Seed: ${SEED}"
+
+# NEW: Check workload type and add argument if specified
+if [[ -n "${WORKLOAD_PATH}" ]]; then
+  echo "  Workload: ${WORKLOAD_PATH} (OASST dataset)"
+  
+  # Verify workload file exists
+  if [[ ! -f "${PROJECT_ROOT}/${WORKLOAD_PATH}" ]]; then
+    echo "❌ ERROR: Workload file not found: ${PROJECT_ROOT}/${WORKLOAD_PATH}"
+    echo "   Generate it first with: python scripts/prepare_oasst_workload.py"
+    exit 1
+  fi
+  
+  WORKLOAD_ARG="--workload-path ${WORKLOAD_PATH}"
+else
+  echo "  Workload: mock (default)"
+  WORKLOAD_ARG=""
+fi
 
 python "${PYTHON_SCRIPT}" \
   --embedding-model "${EMBEDDING_MODEL}" \
@@ -256,7 +316,8 @@ python "${PYTHON_SCRIPT}" \
   --vector-metric "${VECTOR_METRIC}" \
   --eviction-policy "${EVICTION_POLICY}" \
   --seed "${SEED}" \
-  --output-dir "${OUTPUT_DIR}"
+  --output-dir "${OUTPUT_DIR}/${WORKLOAD_NAME}" \
+  ${WORKLOAD_ARG}
 
 echo '----------------------------------------'
 echo 'End Time     : ' $(date)
@@ -272,6 +333,25 @@ run_all() {
   echo "Algorithm configs : ${ALGO_CONFIGS[*]}"
   echo "Eviction policies : ${EVICTION_POLICIES[*]}"
   echo "Seeds             : ${SEEDS[*]}"
+  
+  # NEW: Show workload configuration
+  if [[ -n "${WORKLOAD_PATH}" ]]; then
+    echo "Workload          : ${WORKLOAD_PATH} (OASST with ground truth)"
+    
+    # Verify workload exists before submitting all jobs
+    if [[ ! -f "${PROJECT_ROOT}/${WORKLOAD_PATH}" ]]; then
+      echo ""
+      echo "❌ ERROR: Workload file not found: ${PROJECT_ROOT}/${WORKLOAD_PATH}"
+      echo ""
+      echo "Generate it first with:"
+      echo "  python scripts/prepare_oasst_workload.py \\\n+    --embedding-model nomic-embed-text \\\n+    --num-prompts 800 \\\n+    --num-queries 2000 \\\n+    --output ${WORKLOAD_PATH}"
+      echo ""
+      exit 1
+    fi
+  else
+    echo "Workload          : mock (default, no ground truth)"
+  fi
+  
   echo "Output dir        : ${OUTPUT_DIR}"
   echo "Shared models     : ${SHARED_OLLAMA_MODELS}"
   echo "Partition         : ${PARTITION}"
@@ -297,7 +377,7 @@ run_all() {
               2) skip=$((skip+1));;
               *) ;;
             esac
-            sleep 2
+            sleep 0.2
             if (( total % 10 == 0 )); then
               echo "Pausing for 5 seconds to avoid overwhelming scheduler..."
               sleep 5
@@ -314,7 +394,7 @@ run_all() {
   echo "Submitted : ${sub}"
   echo "Skipped   : ${skip}"
   echo "========================================"
-  echo "Use: squeue -u \\$USER --name='cache_*'"
+  echo "Use: squeue -u \\${USER} --name='cache_*'"
 }
 
 status() {
@@ -346,5 +426,4 @@ case "${1:-all}" in
   status) status ;;
   *) echo "Unknown command '$1' (use all|status)"; exit 1 ;;
 esac
-
 

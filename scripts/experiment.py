@@ -17,13 +17,17 @@ from __future__ import annotations
 import os
 import time
 import hashlib
+import json
 from dataclasses import dataclass, asdict
 import inspect
 import argparse
 import sys
 import traceback
+import logging
 from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
+import numpy as np
+from sentence_transformers import SentenceTransformer, util
 pd.set_option('future.no_silent_downcasting', True)
 
 import openai
@@ -41,6 +45,95 @@ from gptcache.similarity_evaluation import (
 from gptcache.similarity_evaluation import SimilarityEvaluation
 from gptcache.config import Config
 # Note: We provide our own chat pre-processor for compatibility across GPTCache versions
+
+logger = logging.getLogger(__name__)
+
+class AnswerSimilarityCalculator:
+    """Calculates semantic similarity between generated and ground truth answers."""
+    
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        """
+        Initialize similarity calculator.
+        
+        Args:
+            model_name: SentenceTransformer model (default: all-MiniLM-L6-v2)
+        """
+        try:
+            logger.info(f"Loading similarity model: {model_name}")
+            self.model = SentenceTransformer(model_name)
+            self.enabled = True
+            logger.info("✅ Answer similarity calculator ready")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to load similarity model: {e}")
+            logger.warning("⚠️  Answer similarity metrics will be disabled")
+            logger.warning("   Install with: pip install sentence-transformers")
+            self.enabled = False
+    
+    def calculate_similarity(self, answer: str, ground_truth: str) -> float:
+        """
+        Calculate semantic similarity between answer and ground truth.
+        
+        Returns:
+            Cosine similarity (0-1, higher is better), or -1.0 if unavailable
+        """
+        if not self.enabled or not answer or not ground_truth:
+            return -1.0
+        
+        try:
+            embeddings = self.model.encode([answer, ground_truth], convert_to_tensor=True)
+            similarity = util.cos_sim(embeddings[0], embeddings[1]).item()
+            return float(similarity)
+        except Exception as e:
+            logger.warning(f"Similarity calculation failed: {e}")
+            return -1.0
+
+def load_workload_oasst(workload_path: str = "workload_oasst.json"):
+    """
+    Load OASST workload with ground truth answers from JSON file.
+    Falls back to existing mock workload if file not found.
+    
+    Args:
+        workload_path: Path to workload JSON file
+        
+    Returns:
+        List of query dictionaries with prompt, cluster, message_id, ground_truth
+    """
+    if not os.path.exists(workload_path):
+        logger.warning(f"Workload file not found: {workload_path}")
+        logger.warning("Falling back to mock workload (no ground truth)")
+        return generate_mock_workload()  # Call existing mock function
+    
+    try:
+        with open(workload_path, 'r', encoding='utf-8') as f:
+            workload = json.load(f)
+        
+        logger.info(f"✅ Loaded {len(workload)} queries from {workload_path}")
+        
+        # Validate format
+        if not workload or 'prompt' not in workload[0]:
+            raise ValueError("Invalid workload format: missing 'prompt' field")
+        
+        # Check if ground truth is available
+        has_ground_truth = 'ground_truth' in workload[0]
+        if has_ground_truth:
+            logger.info("✅ Ground truth answers available for accuracy measurement")
+        else:
+            logger.warning("⚠️  No ground truth in workload (will skip accuracy metrics)")
+        
+        # Log statistics
+        unique_prompts = len(set(item['message_id'] for item in workload))
+        num_clusters = len(set(item.get('cluster', -1) for item in workload))
+        
+        logger.info(f"   Unique prompts: {unique_prompts}")
+        logger.info(f"   Clusters: {num_clusters}")
+        logger.info(f"   Repeat factor: {len(workload) / unique_prompts:.2f}x")
+        
+        return workload
+        
+    except Exception as e:
+        logger.error(f"Failed to load workload: {e}")
+        logger.warning("Falling back to mock workload")
+        return generate_mock_workload()  # Call existing mock function
 
 # ----------------------------
 # Ollama/OpenAI-compatible setup
@@ -218,7 +311,23 @@ WORKLOAD: List[Tuple[int, str]] = [
 ]
 
 # Optional: repeat workload to see “warm-cache” behavior
-REPEATS = 3
+REPEATS = 1
+
+def generate_mock_workload() -> List[Dict[str, Any]]:
+    """
+    Build a mock workload list of dicts from the static WORKLOAD definitions.
+    Each item includes: prompt, cluster, message_id, ground_truth(None).
+    """
+    mock: List[Dict[str, Any]] = []
+    for cluster_idx, prompt in WORKLOAD:
+        message_id = hashlib.md5(f"{cluster_idx}:{prompt}".encode("utf-8")).hexdigest()
+        mock.append({
+            "prompt": prompt,
+            "cluster": cluster_idx,
+            "message_id": message_id,
+            "ground_truth": None,
+        })
+    return mock
 
 
 @dataclass
@@ -316,10 +425,13 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
             maxsize=max_size,
             clean_size=clean_size,
         )
-        return DataManager(
-            CacheBase("sqlite", sql_url=sql_url),
-            vector_base,
-            eviction_manager=eviction_manager,
+        return get_data_manager(
+            cache_base=CacheBase("sqlite", sql_url=sql_url),
+            vector_base=vector_base,
+            object_base=None,
+            eviction_base=eviction_manager,
+            max_size=max_size,
+            clean_size=clean_size,
         )
 
     # Built-in eviction policies
@@ -332,10 +444,11 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
             clean_size=clean_size,
         )
     else:
-        return DataManager(
-            CacheBase("sqlite", sql_url=sql_url),
-            None,
-            eviction_manager=eviction,
+        return get_data_manager(
+            cache_base=CacheBase("sqlite", sql_url=sql_url),
+            vector_base=None,
+            object_base=None,
+            eviction_base=eviction,
             max_size=max_size,
             clean_size=clean_size,
         )
@@ -358,6 +471,12 @@ def init_cache_for_policy(cfg: RunConfig, similarity_algo: str, vector_metric: s
                         return 0.0
                     d = max(0.0, min(distance, self.max_d))
                     return 1.0 - (d / self.max_d)
+                def range(self) -> Tuple[float, float]:
+                    """Range of similarity score.
+
+                    :return: minimum and maximum of similarity score.
+                    """
+                    return 0.0, 1.0
             similarity_evaluation = L2AsSimilarity(max_d=1.5)
         else:
             similarity_evaluation = SearchDistanceEvaluation()
@@ -410,9 +529,9 @@ def ask_llm(prompt: str) -> Dict[str, Any]:
     return result
 
 
-def run_once(policy_cfg: RunConfig, model_name: str, similarity_algo: str, vector_metric: str, threshold: float, seed: int, repeats: int = 1) -> pd.DataFrame:
+def run_once(policy_cfg: RunConfig, model_name: str, similarity_algo: str, vector_metric: str, threshold: float, seed: int, workload: List[Dict[str, Any]], similarity_calc: Optional[AnswerSimilarityCalculator] = None) -> pd.DataFrame:
     """
-    Run the workload `repeats` times for a given eviction policy, recording per-step metrics.
+    Run the provided workload once for a given eviction policy, recording per-step metrics.
 
     Returns
     -------
@@ -451,37 +570,50 @@ def run_once(policy_cfg: RunConfig, model_name: str, similarity_algo: str, vecto
 
     rows: List[Dict[str, Any]] = []
     step = 0
-    for r in range(repeats):
-        for cluster_idx, prompt in WORKLOAD:
-            step += 1
-            t0 = time.time()
-            raw = ask_llm(prompt)
-            t1 = time.time()
+    for item in workload:
+        prompt = item.get("prompt", "")
+        cluster_idx = item.get("cluster", -1)
+        ground_truth = item.get("ground_truth")
 
-            meta = raw.get("gptcache_meta", {}) or {}
-            # Use the same robust check as the sanity test to determine a hit
-            is_hit = bool(raw.get("gptcache")) or (meta.get("hit") is True)
+        step += 1
+        t0 = time.time()
+        raw = ask_llm(prompt)
+        t1 = time.time()
 
-            rows.append({
-                "embedding_model": model_name,
-                "similarity_algo": f"{similarity_algo}_{vector_metric}" if similarity_algo == "search_distance" else similarity_algo,
-                "threshold": policy_cfg.similarity_threshold,
-                "policy": policy_cfg.eviction,
-                "max_size": policy_cfg.max_size,
-                "clean_size": policy_cfg.clean_size,
-                "repeat": r,
-                "step": step,
-                "cluster": cluster_idx,
-                "prompt": prompt,
-                "hit": is_hit, # Use our reliable is_hit variable
-                # If it's a hit, there is no LLM time.
-                "llm_time_s": meta.get("llm_time_s") if not is_hit else 0.0,
-                "total_time_s": meta.get("total_time_s", (t1 - t0)),
-                "miss_reason": meta.get("miss_reason"),
-                "cache_size": meta.get("cache_size"),
-                "similarity": meta.get("similarity") or meta.get("score") or meta.get("sim"),
-                "distance": meta.get("distance"),
-            })
+        meta = raw.get("gptcache_meta", {}) or {}
+        # Use the same robust check as the sanity test to determine a hit
+        is_hit = bool(raw.get("gptcache")) or (meta.get("hit") is True)
+
+        # NEW: Calculate answer similarity to ground truth if available
+        answer_text = extract_assistant_text(raw)
+        answer_similarity = -1.0
+        if isinstance(answer_text, str) and answer_text and ground_truth and similarity_calc and getattr(similarity_calc, "enabled", False):
+            try:
+                answer_similarity = similarity_calc.calculate_similarity(answer_text, ground_truth)
+            except Exception as _e:
+                logger.warning(f"Similarity calculation failed: {_e}")
+
+        rows.append({
+            "embedding_model": model_name,
+            "similarity_algo": f"{similarity_algo}_{vector_metric}" if similarity_algo == "search_distance" else similarity_algo,
+            "threshold": policy_cfg.similarity_threshold,
+            "policy": policy_cfg.eviction,
+            "max_size": policy_cfg.max_size,
+            "clean_size": policy_cfg.clean_size,
+            "step": step,
+            "cluster": cluster_idx,
+            "prompt": prompt,
+            "message_id": item.get("message_id"),
+            "hit": is_hit,
+            # If it's a hit, there is no LLM time.
+            "llm_time_s": meta.get("llm_time_s") if not is_hit else 0.0,
+            "total_time_s": meta.get("total_time_s", (t1 - t0)),
+            "miss_reason": meta.get("miss_reason"),
+            "cache_size": meta.get("cache_size"),
+            "similarity": meta.get("similarity") or meta.get("score") or meta.get("sim"),
+            "distance": meta.get("distance"),
+            "answer_similarity": answer_similarity,
+        })
     return pd.DataFrame(rows)
 
 
@@ -530,6 +662,47 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
             "cluster_hit_rate_mean": cluster_hit_rate_mean,
         }
 
+        # NEW: Answer quality metrics (if available)
+        if "answer_similarity" in g.columns:
+            valid_similarities = g.loc[g["answer_similarity"].astype(float) >= 0, "answer_similarity"].astype(float)
+            if not valid_similarities.empty:
+                row["answer_similarity_mean"] = float(np.mean(valid_similarities))
+                row["answer_similarity_std"] = float(np.std(valid_similarities))
+
+                hit_mask = g["hit"].fillna(False) & (g["answer_similarity"].astype(float) >= 0)
+                miss_mask = (~g["hit"].fillna(False)) & (g["answer_similarity"].astype(float) >= 0)
+                hit_sims = g.loc[hit_mask, "answer_similarity"].astype(float)
+                miss_sims = g.loc[miss_mask, "answer_similarity"].astype(float)
+
+                row["answer_similarity_hit_mean"] = float(np.mean(hit_sims)) if not hit_sims.empty else -1.0
+                row["answer_similarity_miss_mean"] = float(np.mean(miss_sims)) if not miss_sims.empty else -1.0
+
+                if not hit_sims.empty and not miss_sims.empty:
+                    row["answer_quality_degradation"] = float(np.mean(miss_sims) - np.mean(hit_sims))
+                else:
+                    row["answer_quality_degradation"] = 0.0
+
+                # Log answer quality
+                try:
+                    logger.info("\n📊 Answer Quality Metrics:")
+                    logger.info(f"  Overall similarity:     {row['answer_similarity_mean']:.4f} ± {row['answer_similarity_std']:.4f}")
+                    logger.info(f"  Cache hit similarity:   {row['answer_similarity_hit_mean']:.4f}")
+                    logger.info(f"  Cache miss similarity:  {row['answer_similarity_miss_mean']:.4f}")
+                    logger.info(f"  Quality degradation:    {row['answer_quality_degradation']:+.4f}")
+
+                    if abs(row['answer_quality_degradation']) < 0.02:
+                        logger.info("  ✅ Negligible quality degradation from caching!")
+                    elif row['answer_quality_degradation'] < -0.02:
+                        logger.warning("  ⚠️  Cache hits have lower quality (investigate cache config)")
+                except Exception:
+                    pass
+            else:
+                row["answer_similarity_mean"] = -1
+                row["answer_similarity_std"] = -1
+                row["answer_similarity_hit_mean"] = -1
+                row["answer_similarity_miss_mean"] = -1
+                row["answer_quality_degradation"] = 0
+
         for col, val in zip(group_cols, keys):
             row[col] = val
         summary_rows.append(row)
@@ -550,6 +723,12 @@ def main():
     parser.add_argument('--eviction-policy', type=str, default='LFU', help='Eviction policy (LRU | LFU | FIFO | RR | AP).')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--output-dir', type=str, default="results", help='Directory to save experiment results.')
+    parser.add_argument(
+        '--workload-path',
+        type=str,
+        default='workload_oasst.json',
+        help='Path to OASST workload JSON file with ground truth answers'
+    )
     args = parser.parse_args()
 
     algo_path_name = f"{args.similarity_algo}-{args.vector_metric}" if args.similarity_algo == "search_distance" else args.similarity_algo
@@ -589,6 +768,21 @@ def main():
     print(f"======================")
 
     try:
+        # Load workload (with ground truth if available)
+        workload_path = args.workload_path
+        workload = load_workload_oasst(workload_path)
+
+        # Initialize similarity calculator if ground truth available
+        similarity_calc = None
+        has_ground_truth = bool(workload) and ('ground_truth' in workload[0])
+        if has_ground_truth:
+            similarity_calc = AnswerSimilarityCalculator()
+
+        # Repeat workload for warm cache testing
+        repeats = REPEATS
+        full_workload = workload * repeats
+        logger.info(f"Total queries: {len(full_workload)} ({len(workload)} × {repeats} repeats)")
+
         run_df = run_once(
             cfg,
             model_name=args.embedding_model,
@@ -596,7 +790,8 @@ def main():
             vector_metric=args.vector_metric,
             threshold=args.similarity_threshold,
             seed=args.seed,
-            repeats=REPEATS,
+            workload=full_workload,
+            similarity_calc=similarity_calc,
         )
 
         if run_df.empty:
