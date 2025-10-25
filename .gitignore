@@ -8,6 +8,10 @@ __pycache__/
 *.csv
 *.out
 *.json
+*.pdf
+*.png
+*.txt
+*.tex
 # Distribution / packaging
 .Python
 build/

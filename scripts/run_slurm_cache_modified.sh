@@ -18,14 +18,10 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONDA_ENV="gptcache-env"
 
 EMBEDDING_MODELS=("mxbai-embed-large")
-SEEDS=(42)
+SEEDS=(1 2 3 4 5 6 7 8 9 10)
 
 # Algorithm-specific configurations (algo:metric:thr1,thr2,...)
 declare -a ALGO_CONFIGS=(
-  "search_distance:ip:0.9,0.99,0.95"
-  "search_distance:l2:0.15,0.2,0.25,0.3"
-  "sbert_crossencoder:none:0.95"
-  "sequence_match:none:0.7,0.8,0.9"
   "exact_match:none:1.0"
 )
 

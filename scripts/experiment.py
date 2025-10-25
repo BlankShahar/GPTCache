@@ -24,6 +24,8 @@ import argparse
 import sys
 import traceback
 import logging
+import shutil
+import atexit
 from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
@@ -47,6 +49,9 @@ from gptcache.config import Config
 # Note: We provide our own chat pre-processor for compatibility across GPTCache versions
 
 logger = logging.getLogger(__name__)
+
+# Global list to track temporary directories for cleanup
+TEMP_DIRS_TO_CLEANUP = []
 
 class AnswerSimilarityCalculator:
     """Calculates semantic similarity between generated and ground truth answers."""
@@ -216,6 +221,14 @@ def ollama_embed(text_or_list, **kwargs):
     return _embed_one(s)
 
 
+class OllamaEmbeddingExtractor:
+    """Wrapper to make ollama_embed compatible with SequenceMatchEvaluation."""
+
+    def to_embeddings(self, text: str):
+        """Extract embeddings using Ollama."""
+        return ollama_embed(text)
+
+
 def extract_assistant_text(resp):
     """
     Robust post-process function for GPTCache.
@@ -355,6 +368,7 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
     Constructs a new, EMPTY GPTCache data manager with a unique filename for the experiment.
     Uses LOCAL temporary storage for SQLite/FAISS to avoid NFS I/O issues.
     """
+    global TEMP_DIRS_TO_CLEANUP
     # Use job-local temporary directory (not shared filesystem!)
     if "SLURM_TMPDIR" in os.environ:
         temp_base = os.environ["SLURM_TMPDIR"]
@@ -367,6 +381,14 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
     db_dir = os.path.join(temp_base, "gptcache_db", f"job_{os.getpid()}")
     os.makedirs(db_dir, exist_ok=True)
 
+    # Track this directory for cleanup at the end
+    if db_dir not in TEMP_DIRS_TO_CLEANUP:
+        TEMP_DIRS_TO_CLEANUP.append(db_dir)
+        try:
+            logger.info(f"📂 Tracking temp directory for cleanup: {db_dir}")
+        except Exception:
+            pass
+
     # Create a unique name based on the core algorithm AND the sub-metric AND seed
     algo_name = f"{similarity_algo}-{vector_metric}" if similarity_algo == "search_distance" else similarity_algo
     file_name_suffix = f"{algo_name}_{threshold}_seed{seed}"
@@ -375,27 +397,32 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
     index_path = os.path.join(db_dir, f"faiss_{file_name_suffix}.index")
 
     # Delete old cache files to ensure a clean start for the experiment.
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    if os.path.exists(index_path):
-        os.remove(index_path)
+    for old_file in [db_path, index_path]:
+        if os.path.isfile(old_file):
+            try:
+                os.remove(old_file)
+                logger.info(f"Removed old cache file: {old_file}")
+            except Exception as e:
+                logger.warning(f"Could not remove old file {old_file}: {e}")
 
     print(f"📁 Using local storage for cache database: {db_dir}")
 
     global _INDEX_DIM
     _INDEX_DIM = None
-    # Only probe for embedding dimension if an algorithm uses vector search/reranking
-    if ("search" in similarity_algo) or ("sbert" in similarity_algo):
+    # Determine if this algorithm needs embeddings/vector base
+    needs_vector_base = (("search" in similarity_algo) or ("sbert" in similarity_algo) or ("sequence" in similarity_algo))
+    # Only probe for embedding dimension if algorithm needs vector search
+    if needs_vector_base:
         _ = ollama_embed("faiss_dim_probe")
         if _INDEX_DIM is None:
             raise RuntimeError("Failed to discover embedding dimension.")
     else:
-        _INDEX_DIM = 0  # Placeholder for non-vector algorithms
+        _INDEX_DIM = 1  # Minimal dimension for dummy vector base
 
     sql_url = f"sqlite:///{os.path.abspath(db_path)}"
 
-    # Only create a vector base if required
-    if ("search" in similarity_algo) or ("sbert" in similarity_algo):
+    # Only create a vector base if required; otherwise, create a dummy vector base
+    if needs_vector_base:
         import inspect as _inspect
         vb_kwargs = {"dimension": _INDEX_DIM, "index_path": index_path}
         try:
@@ -410,11 +437,22 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
             vb_kwargs["metric_type"] = vector_metric
         vector_base = VectorBase("faiss", **vb_kwargs)
     else:
-        vector_base = None
+        # Create dummy vector base for exact_match; it won't be used by similarity
+        vector_base = VectorBase(
+            "faiss",
+            dimension=_INDEX_DIM,
+            index_path=index_path,
+        )
 
     # Handle custom eviction policies (e.g., Adaptive Pipeline)
     eviction_upper = eviction.upper() if isinstance(eviction, str) else str(eviction).upper()
     if eviction_upper in ("AP", "ADAPTIVE-PIPELINE", "ADAPTIVEPIPELINE"):
+        # Adaptive Pipeline REQUIRES vector_base
+        if vector_base is None:
+            raise ValueError(
+                f"Adaptive Pipeline eviction policy requires a vector-based similarity algorithm. "
+                f"Cannot use with {similarity_algo}. Try 'search_distance' instead."
+            )
         try:
             from gptcache.manager.eviction.adaptive_memory_cache import AdaptiveMemoryCacheEviction
         except Exception as import_err:
@@ -434,24 +472,14 @@ def make_data_manager(eviction: str, max_size: int, clean_size: int, similarity_
             clean_size=clean_size,
         )
 
-    # Built-in eviction policies
-    if vector_base is not None:
-        return get_data_manager(
-            CacheBase("sqlite", sql_url=sql_url),
-            vector_base,
-            eviction=eviction,
-            max_size=max_size,
-            clean_size=clean_size,
-        )
-    else:
-        return get_data_manager(
-            cache_base=CacheBase("sqlite", sql_url=sql_url),
-            vector_base=None,
-            object_base=None,
-            eviction_base=eviction,
-            max_size=max_size,
-            clean_size=clean_size,
-        )
+    # Built-in eviction policies (works for all algorithms now)
+    return get_data_manager(
+        cache_base=CacheBase("sqlite", sql_url=sql_url),
+        vector_base=vector_base,  # Real or dummy - both work
+        eviction=eviction,
+        max_size=max_size,
+        clean_size=clean_size,
+    )
 
 
 def init_cache_for_policy(cfg: RunConfig, similarity_algo: str, vector_metric: str, threshold: float, seed: int):
@@ -466,11 +494,20 @@ def init_cache_for_policy(cfg: RunConfig, similarity_algo: str, vector_metric: s
             class L2AsSimilarity(SimilarityEvaluation):
                 def __init__(self, max_d: float = 1.5):
                     self.max_d = max_d
-                def evaluation(self, distance: float, **kwargs) -> float:
+
+                def evaluation(self, src_dict: Dict[str, Any], cache_dict: Dict[str, Any], **_) -> float:
+                    """Evaluate similarity based on L2 distance.
+
+                    :param src_dict: the query dictionary to evaluate with cache.
+                    :param cache_dict: the cache dictionary containing 'search_result'.
+                    :return: similarity score between 0.0 and 1.0
+                    """
+                    distance, _ = cache_dict.get("search_result", (None, None))
                     if distance is None:
                         return 0.0
                     d = max(0.0, min(distance, self.max_d))
                     return 1.0 - (d / self.max_d)
+
                 def range(self) -> Tuple[float, float]:
                     """Range of similarity score.
 
@@ -484,13 +521,13 @@ def init_cache_for_policy(cfg: RunConfig, similarity_algo: str, vector_metric: s
         similarity_evaluation = ExactMatchEvaluation()
     elif similarity_algo == "sequence_match":
         try:
-            sig = inspect.signature(SequenceMatchEvaluation.__init__)
-            if "threshold" in sig.parameters:
-                similarity_evaluation = SequenceMatchEvaluation(threshold=cfg.similarity_threshold)
-            elif "score_threshold" in sig.parameters:
-                similarity_evaluation = SequenceMatchEvaluation(score_threshold=cfg.similarity_threshold)
-            else:
-                similarity_evaluation = SequenceMatchEvaluation()
+            # SequenceMatch uses GPTCache's built-in embedding models; use ONNX
+            from gptcache.embedding import Onnx  # ensure backend is available
+            weights = [1.0, 0.5, 0.25]
+            similarity_evaluation = SequenceMatchEvaluation(
+                weights=weights,
+                embedding_extractor="onnx",
+            )
         except Exception as e:
             raise RuntimeError(f"SequenceMatchEvaluation init failed: {e}")
     elif similarity_algo == "sbert_crossencoder":
@@ -711,10 +748,62 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(summary_rows).sort_values(sort_cols, ascending=[True, True, True, False, False][:len(sort_cols)])
 
 
+def cleanup_temp_directories():
+    """
+    Clean up all temporary directories created during the experiment.
+    Prevents SLURM_TMPDIR from filling up across multiple jobs.
+    """
+    global TEMP_DIRS_TO_CLEANUP
+    
+    if not TEMP_DIRS_TO_CLEANUP:
+        try:
+            logger.info("🧹 No temporary directories to clean up")
+        except Exception:
+            pass
+        return
+    
+    try:
+        logger.info("\n" + "="*80)
+        logger.info("🧹 CLEANING UP TEMPORARY DIRECTORIES")
+        logger.info("="*80)
+    except Exception:
+        pass
+    
+    for temp_dir in TEMP_DIRS_TO_CLEANUP:
+        if os.path.exists(temp_dir):
+            try:
+                size_mb = 0.0
+                try:
+                    size_mb = sum(
+                        os.path.getsize(os.path.join(dirpath, filename))
+                        for dirpath, dirnames, filenames in os.walk(temp_dir)
+                        for filename in filenames
+                    ) / (1024 * 1024)
+                except Exception:
+                    size_mb = 0.0
+                shutil.rmtree(temp_dir)
+                logger.info(f"✅ Removed: {temp_dir} ({size_mb:.2f} MB freed)")
+            except Exception as e:
+                logger.warning(f"⚠️  Could not remove {temp_dir}: {e}")
+        else:
+            try:
+                logger.info(f"ℹ️  Directory already removed: {temp_dir}")
+            except Exception:
+                pass
+    
+    try:
+        logger.info("="*80)
+        logger.info("✅ Cleanup complete!")
+        logger.info("="*80 + "\n")
+    except Exception:
+        pass
+
 def main():
     """
     Run a single experiment configuration, controlled by command-line arguments.
     """
+    # Register cleanup to run even if script crashes
+    atexit.register(cleanup_temp_directories)
     parser = argparse.ArgumentParser(description="Run a single GPTCache experiment.")
     parser.add_argument('--embedding-model', type=str, required=True, help='Name of the embedding model to test.')
     parser.add_argument('--similarity-threshold', type=float, required=True, help='Similarity threshold for cache hits.')
@@ -806,6 +895,8 @@ def main():
         print(f"\n[SUCCESS] Results saved to: {run_output_dir}")
         print("\nSummary for this run:")
         print(summary.to_string(index=False))
+        # Clean up temporary directories on success
+        cleanup_temp_directories()
 
     except Exception as e:
         print(
@@ -814,6 +905,8 @@ def main():
         )
         print(f"Error: {e}", file=sys.stderr)
         traceback.print_exc()
+        # Clean up temporary directories even on failure
+        cleanup_temp_directories()
         sys.exit(1)
 
 
